@@ -134,6 +134,21 @@ class NeuralEnvironment():
             (self.num_envs, self.joint_f_dim), 
             device = self.torch_device
         )
+        self.action_saturation_mask = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.torch_device
+        )
+        self.action_saturation_count = torch.zeros(
+            self.num_envs, dtype=torch.int32, device=self.torch_device
+        )
+        self.joint_limit_violation_mask = torch.zeros(
+            (self.num_envs, self.dof_q_per_env),
+            dtype=torch.bool,
+            device=self.torch_device,
+        )
+        self.terminated = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.torch_device
+        )
+        self.termination_reasons = [None] * self.num_envs
 
         # root body q (used for dataset generation)
         self.root_body_q = wp.to_torch(
@@ -213,6 +228,10 @@ class NeuralEnvironment():
     @property
     def abstract_contacts(self):
         return self.env.abstract_contacts
+
+    @property
+    def contact_validity_mask(self):
+        return self.env.abstract_contacts.contact_valid
 
     @property
     def sim_states(self):
@@ -383,8 +402,45 @@ class NeuralEnvironment():
 
         # Update states
         self._update_states()
+        self._record_robot_contract_status(actions)
 
         return self.states
+
+    def _record_robot_contract_status(self, actions):
+        action_limits = torch.as_tensor(
+            self.env.control_limits,
+            dtype=actions.dtype,
+            device=actions.device,
+        )
+        saturation = (actions < action_limits[:, 0]) | (actions > action_limits[:, 1])
+        self.action_saturation_mask = saturation.any(dim=1)
+        self.action_saturation_count = saturation.sum(dim=1, dtype=torch.int32)
+
+        if not hasattr(self.env, "robot_spec"):
+            return
+        spec = self.env.robot_spec
+        joint_limits = torch.as_tensor(
+            spec.joint_limits,
+            dtype=self.states.dtype,
+            device=self.states.device,
+        )
+        q = self.states[:, : self.dof_q_per_env]
+        violations = (q < joint_limits[:, 0]) | (q > joint_limits[:, 1])
+        self.joint_limit_violation_mask = violations
+        newly_terminated = violations.any(dim=1) & ~self.terminated
+        for env_id in torch.where(newly_terminated)[0].tolist():
+            joint_id = int(torch.where(violations[env_id])[0][0])
+            self.termination_reasons[env_id] = (
+                f"joint_limit:{spec.joint_names[joint_id]}"
+            )
+        self.terminated |= violations.any(dim=1)
+
+    def _reset_robot_contract_status(self):
+        self.action_saturation_mask.zero_()
+        self.action_saturation_count.zero_()
+        self.joint_limit_violation_mask.zero_()
+        self.terminated.zero_()
+        self.termination_reasons = [None] * self.num_envs
 
     # joint_f are the raw values
     def step_with_joint_f(
@@ -433,6 +489,7 @@ class NeuralEnvironment():
         else:
             self.env.reset()
             self._update_states()
+            self._reset_robot_contract_status()
         
         # special reset for neural solver (e.g. clear states history)            
         self.solver_neural.reset()
@@ -445,6 +502,7 @@ class NeuralEnvironment():
         """Resets all envs if env_ids is None."""
         self.env.reset_envs(env_ids)
         self._update_states()
+        self._reset_robot_contract_status()
         # special reset for neural solver (e.g. clear states history)  
         # TODO[Jie]: now reset for all envs together, need to be fixed.
         self.solver_neural.reset()
@@ -452,3 +510,15 @@ class NeuralEnvironment():
     def render(self):
         self.env.render()
         time.sleep(self.env.frame_dt)
+
+    def log_robot_diagnostics(self, step, actions):
+        viewer = getattr(self.env, "viewer", None)
+        if viewer is None or not hasattr(viewer, "log_robot_diagnostics"):
+            return
+        viewer.log_robot_diagnostics(
+            step=step,
+            states=self.states,
+            actions=actions,
+            joint_f=self.joint_f,
+            robot_spec=self.env.robot_spec,
+        )

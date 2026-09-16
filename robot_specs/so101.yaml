@@ -1,0 +1,73 @@
+robot_id: so101
+asset_source: /home/core/robotics-rl/modules/body/robotstudio_so101/so101.xml
+base_type: fixed
+dof: 6
+joint_names:
+  - shoulder_pan
+  - shoulder_lift
+  - elbow_flex
+  - wrist_flex
+  - wrist_roll
+  - gripper
+joint_types:
+  - revolute
+  - revolute
+  - revolute
+  - revolute
+  - revolute
+  - revolute
+controllable_dofs:
+  - shoulder_pan
+  - shoulder_lift
+  - elbow_flex
+  - wrist_flex
+  - wrist_roll
+  - gripper
+joint_limits:
+  - [-1.91986, 1.91986]
+  - [-1.7453293, 1.7453293]
+  - [-1.69, 1.69]
+  - [-1.658063, 1.658063]
+  - [-2.7438473, 2.7438473]
+  - [-0.174533, 1.7453292]
+velocity_limits: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+effort_limits: [2.94, 2.94, 2.94, 2.94, 2.94, 2.94]
+default_q: [0.0, -0.7, 1.2, 0.6, 0.0, 0.5]
+default_qd: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+action_limits:
+  - [-1.0, 1.0]
+  - [-1.0, 1.0]
+  - [-1.0, 1.0]
+  - [-1.0, 1.0]
+  - [-1.0, 1.0]
+  - [-1.0, 1.0]
+actuator_mode: position
+damping: [0.6, 0.6, 0.6, 0.6, 0.6, 0.6]
+armature: [0.028, 0.028, 0.028, 0.028, 0.028, 0.028]
+position_gains: [998.22, 998.22, 998.22, 998.22, 998.22, 998.22]
+initial_q_ranges:
+  - [-1.0, 1.0]
+  - [-1.0, 0.3]
+  - [0.5, 1.5]
+  - [-0.5, 1.0]
+  - [-1.0, 1.0]
+  - [0.3, 0.8]
+initial_qd_ranges:
+  - [-0.25, 0.25]
+  - [-0.25, 0.25]
+  - [-0.25, 0.25]
+  - [-0.25, 0.25]
+  - [-0.25, 0.25]
+  - [-0.25, 0.25]
+end_effector:
+  body_name: gripper
+gripper:
+  joint_names: [gripper]
+solver:
+  fps: 200
+  sim_substeps: 1
+  gravity: -9.81
+  ground_plane: false
+  self_collisions: true
+  show_collision_mesh: true
+  njmax: 1024

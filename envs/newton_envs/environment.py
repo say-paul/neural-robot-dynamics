@@ -26,6 +26,7 @@ from typing import List
 class RenderMode(Enum):
     NONE = "none"
     OPENGL = "opengl"
+    RERUN = "rerun"
     USD = "usd"
 
     def __str__(self):
@@ -158,6 +159,7 @@ class Environment:
 
     render_mode: RenderMode = RenderMode.OPENGL
     opengl_render_settings = dict()
+    rerun_render_settings = dict()
     usd_render_settings = dict()
     show_rigid_contact_points = False
     contact_points_radius = 1e-3
@@ -224,7 +226,8 @@ class Environment:
         profile: bool = False,
         enable_timers: bool = False,
         use_graph_capture: bool = None,
-        setup_viewer: bool = True
+        setup_viewer: bool = True,
+        rerun_render_settings: dict = None,
     ):
         if num_envs is not None:
             self.num_envs = num_envs
@@ -234,6 +237,8 @@ class Environment:
             self.solver_type = solver_type
         if render_mode is not None:
             self.render_mode = render_mode
+        if rerun_render_settings is not None:
+            self.rerun_render_settings = rerun_render_settings
         if use_graph_capture is not None:
             self.use_graph_capture = use_graph_capture
         self.device = wp.get_device(device)
@@ -399,6 +404,10 @@ class Environment:
     def setup_viewer(self):
         if self.render_mode == RenderMode.OPENGL:
             self.viewer = newton.viewer.ViewerGL(**self.opengl_render_settings)
+        elif self.render_mode == RenderMode.RERUN:
+            from utils.rerun_viewer import ViewerRerun
+
+            self.viewer = ViewerRerun(**self.rerun_render_settings)
         elif self.render_mode == RenderMode.USD:
             filename = os.path.join(
                 os.path.dirname(__file__), "..", "outputs", self.sim_name + ".usd"
@@ -409,7 +418,11 @@ class Environment:
             )
         else:
             self.viewer = newton.viewer.ViewerNull()
+        if self.render_mode == RenderMode.RERUN and hasattr(self.viewer, "set_solver"):
+            self.viewer.set_solver(self.solver)
         self.viewer.set_model(self.model)
+        if self.render_mode == RenderMode.RERUN and hasattr(self.solver, "shape_incoming_xform"):
+            self.viewer.set_shape_incoming_xform(self.solver.shape_incoming_xform)
 
     @property
     def uses_generalized_coordinates(self):
@@ -732,4 +745,6 @@ class Environment:
         pass
 
     def close(self):
-        pass
+        if self.viewer is not None:
+            self.viewer.close()
+            self.viewer = None

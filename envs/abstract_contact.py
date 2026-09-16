@@ -97,4 +97,9 @@ class AbstractContact:
             dtype = torch.float32,
             device = device
         )
+        self.contact_valid = torch.zeros(
+            (self.num_total_contacts,),
+            dtype = torch.bool,
+            device = device
+        )
             

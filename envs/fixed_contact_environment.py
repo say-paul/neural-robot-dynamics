@@ -262,25 +262,26 @@ class FixedContactEnvironment:
         shape_body = model.shape_body.numpy()
         shape_flags = model.shape_flags.numpy()
 
-        for i in range(num_shapes_per_env):
-            # static shapes are ignored, e.g. ground
-            if shape_body[i] == -1:
-                continue
-            # filter out visual meshes
-            if (
-                shape_flags[i] & int(ShapeFlags.COLLIDE_SHAPES) == 0
-            ):
-                continue
-            
-            geo_type = geo_types[i]
-            if geo_type == GeoType.SPHERE:
-                self.num_contacts_per_env += 1
-            elif geo_type == GeoType.CAPSULE:
-                self.num_contacts_per_env += 2
-            elif geo_type == GeoType.BOX:
-                self.num_contacts_per_env += 8
-            else: # NOTE: temporary use COM for for mesh and cylinder shapes
-                self.num_contacts_per_env += 1
+        if model.ground:
+            for i in range(num_shapes_per_env):
+                # static shapes are ignored, e.g. ground
+                if shape_body[i] == -1:
+                    continue
+                # filter out visual meshes
+                if (
+                    shape_flags[i] & int(ShapeFlags.COLLIDE_SHAPES) == 0
+                ):
+                    continue
+
+                geo_type = geo_types[i]
+                if geo_type == GeoType.SPHERE:
+                    self.num_contacts_per_env += 1
+                elif geo_type == GeoType.CAPSULE:
+                    self.num_contacts_per_env += 2
+                elif geo_type == GeoType.BOX:
+                    self.num_contacts_per_env += 8
+                else:  # NOTE: temporary use COM for mesh and cylinder shapes
+                    self.num_contacts_per_env += 1
         
         model.num_contacts_per_env = self.num_contacts_per_env
 
@@ -295,33 +296,34 @@ class FixedContactEnvironment:
         self.contacts_neural_solver = self.create_newton_contacts(model)
         
         # Generate the fixed contact points once at the beginning of the simulation
-        wp.launch(
-            generate_contact_points,
-            dim=model.num_envs,
-            inputs=[
-                model.shape_transform,
-                model.shape_body,
-                model.shape_type,
-                model.shape_scale,
-                model.shape_thickness,
-                model.shape_flags,
-                num_shapes_per_env,
-                self.num_contacts_per_env,
-                model.shape_count - 1,  # ground plane index
-                model.up_vector,
-            ],
-            outputs=[
-                self.contacts_neural_solver.rigid_contact_shape0,
-                self.contacts_neural_solver.rigid_contact_shape1,
-                self.contacts_neural_solver.rigid_contact_point0,
-                self.contacts_neural_solver.rigid_contact_point1,
-                self.contacts_neural_solver.rigid_contact_thickness0,
-                self.contacts_neural_solver.rigid_contact_thickness1,
-                self.contacts_neural_solver.rigid_contact_normal,
-                self.contacts_neural_solver.rigid_contact_depth,
-            ],
-            device=model.device,
-        )
+        if model.ground and self.num_contacts_per_env > 0:
+            wp.launch(
+                generate_contact_points,
+                dim=model.num_envs,
+                inputs=[
+                    model.shape_transform,
+                    model.shape_body,
+                    model.shape_type,
+                    model.shape_scale,
+                    model.shape_thickness,
+                    model.shape_flags,
+                    num_shapes_per_env,
+                    self.num_contacts_per_env,
+                    model.shape_count - 1,  # ground plane index
+                    model.up_vector,
+                ],
+                outputs=[
+                    self.contacts_neural_solver.rigid_contact_shape0,
+                    self.contacts_neural_solver.rigid_contact_shape1,
+                    self.contacts_neural_solver.rigid_contact_point0,
+                    self.contacts_neural_solver.rigid_contact_point1,
+                    self.contacts_neural_solver.rigid_contact_thickness0,
+                    self.contacts_neural_solver.rigid_contact_thickness1,
+                    self.contacts_neural_solver.rigid_contact_normal,
+                    self.contacts_neural_solver.rigid_contact_depth,
+                ],
+                device=model.device,
+            )
 
 
     def create_newton_contacts(self, model: newton.Model):

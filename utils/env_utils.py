@@ -26,7 +26,8 @@ from envs.newton_envs import RenderMode
 
 ENV_CLS = {
     "Cartpole": getattr(newton_envs, "CartpoleEnvironment", None),
-    "Ant": getattr(newton_envs, "AntEnvironment", None)
+    "Ant": getattr(newton_envs, "AntEnvironment", None),
+    "Robot": getattr(newton_envs, "RobotEnvironment", None),
 }
 
 def create_fixed_contact_env(
