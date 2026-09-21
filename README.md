@@ -77,14 +77,14 @@ python example_neural_solver_rl.py --rl-cfg ./rl_cfg/Ant/ant_run.yaml --exp-name
 
 ### Robot Data And NeRD Training
 
-The script [`examples/example_robot_nerd_train.py`](examples/example_robot_nerd_train.py) collects independent random ground-truth robot motion into transition-mode HDF5 files for `train`, `validation`, and `test`, trains a compact state-delta NeRD model from the first two files, reloads its `.pt` checkpoint, and evaluates it on the untouched test file. The resulting model uses the neural solver input contract `states_embedding + joint_f`, where `joint_f` includes torque commands or position/velocity targets as appropriate, and can be used as the basis for a longer training run.
+The script [`examples/example_robot_nerd_train.py`](examples/example_robot_nerd_train.py) collects independent random ground-truth robot motion into transition-mode HDF5 files for `train`, `validation`, and `test`, trains a compact state-delta NeRD model from the first two files, reloads its `.pt` checkpoint, and evaluates it on the untouched test file. Saturated actuator commands and transitions that begin or end outside joint limits are rejected before writing, so the data contains only physically valid robot motion. The resulting model uses the neural solver input contract `states_embedding + joint_f`, where `joint_f` includes torque commands or position/velocity targets as appropriate, and can be used as the basis for a longer training run.
 
 ```bash
 PYTHONPATH="$PWD" .venv312/bin/python examples/example_robot_nerd_train.py \
   --robot-id so101 --num-envs 1 --horizon 1200 --seed 42 --default-pose \
   --render --render-backend rerun --rerun-view camera \
   --grpc-port 19878 --web-port 19092 --browser-host localhost \
-  --diagnostics --action-scale 2.0 --keep-open
+  --diagnostics --action-scale 1.0 --keep-open
 ```
 
 By default, the generated artifacts are `outputs/so101_train.hdf5`, `outputs/so101_validation.hdf5`, `outputs/so101_test.hdf5`, and `outputs/so101_nerd_model.pt`. To generate only test data for a separate NeRD training/evaluation run:

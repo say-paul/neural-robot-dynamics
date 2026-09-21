@@ -65,6 +65,10 @@ def configure_render(args):
     }
 
 
+def valid_transition_mask(was_terminated, action_saturation_mask, is_terminated):
+    return ~(was_terminated | action_saturation_mask | is_terminated)
+
+
 def collect_dataset(args, device, split, seed):
     render = args.render and split in args.render_splits
     env = NeuralEnvironment(
@@ -85,7 +89,9 @@ def collect_dataset(args, device, split, seed):
         state = env.states.clone()
         generator = torch.Generator(device=env.torch_device).manual_seed(seed + 1)
         states, actions, joint_forces, next_states = [], [], [], []
+        rejected_transitions = 0
         for step in range(args.horizon):
+            was_terminated = env.terminated.clone()
             action = (
                 torch.rand(
                     (args.num_envs, env.action_dim),
@@ -96,23 +102,36 @@ def collect_dataset(args, device, split, seed):
                 - 1.0
             ) * args.action_scale
             next_state = env.step(action, env_mode="ground-truth").clone()
-            states.append(state.cpu())
-            actions.append(action.cpu())
-            joint_forces.append(env.joint_f.clone().cpu())
-            next_states.append(next_state.cpu())
+            accepted = valid_transition_mask(
+                was_terminated,
+                env.action_saturation_mask,
+                env.terminated,
+            )
+            rejected_transitions += int((~accepted).sum().item())
+            if accepted.any():
+                states.append(state[accepted].cpu())
+                actions.append(action[accepted].cpu())
+                joint_forces.append(env.joint_f[accepted].cpu())
+                next_states.append(next_state[accepted].cpu())
             if args.diagnostics and render:
                 env.log_robot_diagnostics(step, action)
             if render:
                 env.render()
             state = next_state
 
+        if not states:
+            raise RuntimeError(
+                "No physically valid robot transitions were collected; reduce "
+                "--action-scale or use a shorter horizon."
+            )
         dataset = {
             "states": torch.cat(states).numpy(),
             "actions": torch.cat(actions).numpy(),
             "joint_f": torch.cat(joint_forces).numpy(),
             "next_states": torch.cat(next_states).numpy(),
+            "rejected_transitions": rejected_transitions,
         }
-        if not all(np.isfinite(value).all() for value in dataset.values()):
+        if not all(np.isfinite(value).all() for value in dataset.values() if isinstance(value, np.ndarray)):
             raise RuntimeError("Collected robot data contains non-finite values")
         return dataset, env.state_dim, env.joint_f_dim, env
     except Exception:
@@ -132,7 +151,10 @@ def write_dataset(path, dataset, args, split, seed, state_dim, joint_f_dim):
         group.attrs["state_dim"] = state_dim
         group.attrs["joint_f_dim"] = joint_f_dim
         group.attrs["state_target"] = "next_states - states"
+        group.attrs["rejected_transitions"] = dataset["rejected_transitions"]
         for name, value in dataset.items():
+            if name == "rejected_transitions":
+                continue
             group.create_dataset(name, data=value, compression="gzip")
     with h5py.File(path, "r", swmr=True, libver="latest") as file:
         data_group: Any = file["data"]
@@ -359,6 +381,7 @@ def main():
             dimensions = (state_dim, joint_f_dim)
             print(
                 f"generated split={split} transitions={len(dataset['states'])} "
+                f"rejected={dataset['rejected_transitions']} "
                 f"dataset={path}",
                 flush=True,
             )

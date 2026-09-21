@@ -2,6 +2,7 @@ import numpy as np
 import torch
 
 from envs.neural_environment import NeuralEnvironment
+from examples.example_robot_nerd_train import valid_transition_mask
 from robot_specs import load_robot_spec
 
 
@@ -100,6 +101,16 @@ def test_so101_action_saturation_is_recorded():
         assert env.action_saturation_count.tolist() == [6]
     finally:
         env.close()
+
+
+def test_dataset_transition_filter_rejects_unphysical_samples():
+    accepted = valid_transition_mask(
+        was_terminated=torch.tensor([False, False, True, False]),
+        action_saturation_mask=torch.tensor([False, True, False, False]),
+        is_terminated=torch.tensor([False, False, True, True]),
+    )
+
+    assert accepted.tolist() == [True, False, False, False]
 
 
 def test_so101_random_rollout_is_finite_and_records_limit_termination():
