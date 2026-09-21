@@ -39,11 +39,18 @@ class ViewerRerun(NewtonViewerRerun):
         self._viewer_process = None
 
         rr.init(self.app_id)
-        server_uri = rr.serve_grpc(
+        self.recording = rr.get_global_data_recording()
+        if self.recording is None:
+            raise RuntimeError("Rerun did not create a global recording stream")
+        server_uri = self.recording.serve_grpc(
             grpc_port=grpc_port,
             cors_allow_origin=["*"],
         )
-        rr.serve_web_viewer(web_port=web_port, open_browser=False)
+        rr.serve_web_viewer(
+            web_port=web_port,
+            open_browser=False,
+            connect_to=server_uri,
+        )
 
         browser_uri = f"rerun+http://{browser_host}:{grpc_port}/proxy"
         self.web_url = (

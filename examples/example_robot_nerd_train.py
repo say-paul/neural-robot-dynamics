@@ -1,0 +1,417 @@
+import argparse
+import os
+import time
+from typing import Any
+
+import h5py
+import numpy as np
+import torch
+import torch.nn.functional as functional
+
+from envs.neural_environment import NeuralEnvironment
+from models.models import ModelMixedInput
+
+
+def model_config():
+    return {
+        "encoder": {
+            "low_dim": {
+                "activation": "relu",
+                "layer_sizes": [],
+                "layernorm": False,
+            }
+        },
+        "model": {
+            "mlp": {
+                "activation": "relu",
+                "layer_sizes": [128, 128],
+                "layernorm": False,
+            }
+        },
+        "normalize_input": False,
+        "normalize_output": False,
+        "output_tanh": False,
+    }
+
+
+def create_model(state_dim, joint_f_dim, device):
+    sample = {
+        "states_embedding": torch.zeros((1, 1, state_dim), device=device),
+        "joint_f": torch.zeros((1, 1, joint_f_dim), device=device),
+    }
+    return ModelMixedInput(
+        input_sample=sample,
+        output_dim=state_dim,
+        input_cfg={"low_dim": ["states_embedding", "joint_f"]},
+        network_cfg=model_config(),
+        device=device,
+    )
+
+
+def configure_render(args):
+    if args.render_backend != "rerun":
+        return {}
+    from envs.newton_envs import RenderMode
+
+    os.environ.setdefault("MUJOCO_GL", "egl")
+    return {
+        "render_mode": RenderMode.RERUN,
+        "rerun_render_settings": {
+            "grpc_port": args.grpc_port,
+            "web_port": args.web_port,
+            "browser_host": args.browser_host,
+            "native_camera": args.rerun_view == "camera",
+        },
+    }
+
+
+def collect_dataset(args, device, split, seed):
+    render = args.render and split in args.render_splits
+    env = NeuralEnvironment(
+        env_name="Robot",
+        num_envs=args.num_envs,
+        newton_env_cfg={
+            "robot_spec": args.robot_id,
+            "seed": seed,
+            "random_reset": not args.default_pose,
+            **(configure_render(args) if render else {}),
+        },
+        default_env_mode="ground-truth",
+        device=device,
+        render=render,
+    )
+    try:
+        env.reset()
+        state = env.states.clone()
+        generator = torch.Generator(device=env.torch_device).manual_seed(seed + 1)
+        states, actions, joint_forces, next_states = [], [], [], []
+        for step in range(args.horizon):
+            action = (
+                torch.rand(
+                    (args.num_envs, env.action_dim),
+                    generator=generator,
+                    device=env.torch_device,
+                )
+                * 2.0
+                - 1.0
+            ) * args.action_scale
+            next_state = env.step(action, env_mode="ground-truth").clone()
+            states.append(state.cpu())
+            actions.append(action.cpu())
+            joint_forces.append(env.joint_f.clone().cpu())
+            next_states.append(next_state.cpu())
+            if args.diagnostics and render:
+                env.log_robot_diagnostics(step, action)
+            if render:
+                env.render()
+            state = next_state
+
+        dataset = {
+            "states": torch.cat(states).numpy(),
+            "actions": torch.cat(actions).numpy(),
+            "joint_f": torch.cat(joint_forces).numpy(),
+            "next_states": torch.cat(next_states).numpy(),
+        }
+        if not all(np.isfinite(value).all() for value in dataset.values()):
+            raise RuntimeError("Collected robot data contains non-finite values")
+        return dataset, env.state_dim, env.joint_f_dim, env
+    except Exception:
+        env.close()
+        raise
+
+
+def write_dataset(path, dataset, args, split, seed, state_dim, joint_f_dim):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with h5py.File(path, "w", libver="latest") as file:
+        group = file.create_group("data")
+        group.attrs["mode"] = "transition"
+        group.attrs["total_transitions"] = len(dataset["states"])
+        group.attrs["robot_id"] = args.robot_id
+        group.attrs["split"] = split
+        group.attrs["seed"] = seed
+        group.attrs["state_dim"] = state_dim
+        group.attrs["joint_f_dim"] = joint_f_dim
+        group.attrs["state_target"] = "next_states - states"
+        for name, value in dataset.items():
+            group.create_dataset(name, data=value, compression="gzip")
+    with h5py.File(path, "r", swmr=True, libver="latest") as file:
+        data_group: Any = file["data"]
+        if data_group["states"].shape[0] != len(dataset["states"]):
+            raise RuntimeError("HDF5 dataset validation failed")
+        if data_group.attrs["split"] != split:
+            raise RuntimeError("HDF5 dataset split metadata validation failed")
+
+
+def load_dataset(path, expected_split=None):
+    with h5py.File(path, "r", swmr=True, libver="latest") as file:
+        if "data" not in file:
+            raise RuntimeError(f"Dataset {path} does not contain a data group")
+        group: Any = file["data"]
+        if group.attrs.get("mode") != "transition":
+            raise RuntimeError(f"Dataset {path} is not a transition dataset")
+        split = group.attrs.get("split", "unknown")
+        if expected_split is not None and split != expected_split:
+            raise RuntimeError(
+                f"Dataset {path} has split {split!r}; expected {expected_split!r}"
+            )
+        dataset: dict[str, np.ndarray] = {
+            name: np.asarray(group[name][()]) for name in group.keys()
+        }
+
+    required = {"states", "actions", "joint_f", "next_states"}
+    missing = required.difference(dataset)
+    if missing:
+        raise RuntimeError(f"Dataset {path} is missing fields: {sorted(missing)}")
+    if not all(np.isfinite(value).all() for value in dataset.values()):
+        raise RuntimeError(f"Dataset {path} contains non-finite values")
+    lengths = {len(value) for value in dataset.values()}
+    if len(lengths) != 1 or not lengths or not next(iter(lengths)):
+        raise RuntimeError(f"Dataset {path} has inconsistent or empty transitions")
+    return dataset
+
+
+def train_and_test(train_dataset, validation_dataset, test_dataset,
+                   state_dim, joint_f_dim, args, device):
+    train_states = torch.from_numpy(train_dataset["states"]).to(device)
+    train_joint_f = torch.from_numpy(train_dataset["joint_f"]).to(device)
+    train_targets = torch.from_numpy(
+        train_dataset["next_states"] - train_dataset["states"]
+    ).to(device)
+    validation_states = torch.from_numpy(validation_dataset["states"]).to(device)
+    validation_joint_f = torch.from_numpy(validation_dataset["joint_f"]).to(device)
+    validation_targets = torch.from_numpy(
+        validation_dataset["next_states"] - validation_dataset["states"]
+    ).to(device)
+    if len(train_states) < 1 or len(validation_states) < 1:
+        raise ValueError("Train and validation datasets must contain transitions")
+
+    model = create_model(state_dim, joint_f_dim, device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    generator = torch.Generator(device=device).manual_seed(args.seed + 10)
+    model.train()
+    for epoch in range(args.epochs):
+        indices = torch.randint(
+            len(train_states), (args.batch_size,), generator=generator, device=device
+        )
+        prediction = model(
+            {
+                "states_embedding": train_states[indices].unsqueeze(1),
+                "joint_f": train_joint_f[indices].unsqueeze(1),
+            }
+        ).squeeze(1)
+        loss = functional.mse_loss(prediction, train_targets[indices])
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        if args.render and "train" in args.render_splits and args.render_backend == "rerun":
+            import rerun as rr
+
+            rr.set_time("training_epoch", sequence=epoch)
+            rr.log("robot/training/mse", rr.Scalars(float(loss.detach().cpu())))
+
+    model.eval()
+    with torch.no_grad():
+        validation_prediction = model.evaluate(
+            {
+                "states_embedding": validation_states.unsqueeze(1),
+                "joint_f": validation_joint_f.unsqueeze(1),
+            }
+        ).squeeze(1)
+        validation_mse = functional.mse_loss(
+            validation_prediction, validation_targets
+        ).item()
+    if not np.isfinite(validation_mse):
+        raise RuntimeError("Validation produced a non-finite loss")
+
+    checkpoint = {
+        "format": "nerd_robot_v1",
+        "robot_id": args.robot_id,
+        "state_dim": state_dim,
+        "joint_f_dim": joint_f_dim,
+        "input_cfg": {"low_dim": ["states_embedding", "joint_f"]},
+        "network_cfg": model_config(),
+        "prediction_type": "relative",
+        "train_dataset_path": os.path.abspath(args.train_dataset_path),
+        "validation_dataset_path": os.path.abspath(args.validation_dataset_path),
+        "state_dict": model.state_dict(),
+    }
+    if test_dataset is not None:
+        test_states = torch.from_numpy(test_dataset["states"]).to(device)
+        test_joint_f = torch.from_numpy(test_dataset["joint_f"]).to(device)
+        test_targets = torch.from_numpy(
+            test_dataset["next_states"] - test_dataset["states"]
+        ).to(device)
+        with torch.no_grad():
+            test_prediction = model.evaluate(
+                {
+                    "states_embedding": test_states.unsqueeze(1),
+                    "joint_f": test_joint_f.unsqueeze(1),
+                }
+            ).squeeze(1)
+            test_mse = functional.mse_loss(test_prediction, test_targets).item()
+        if not np.isfinite(test_mse):
+            raise RuntimeError("Test produced a non-finite loss")
+        checkpoint["test_dataset_path"] = os.path.abspath(args.test_dataset_path)
+    else:
+        test_mse = None
+    os.makedirs(os.path.dirname(os.path.abspath(args.checkpoint_path)), exist_ok=True)
+    torch.save(checkpoint, args.checkpoint_path)
+    loaded = torch.load(args.checkpoint_path, map_location=device, weights_only=True)
+    reloaded_model = create_model(loaded["state_dim"], loaded["joint_f_dim"], device)
+    reloaded_model.load_state_dict(loaded["state_dict"])
+    reloaded_model.eval()
+    with torch.no_grad():
+        reloaded_prediction = reloaded_model.evaluate(
+            {
+                "states_embedding": validation_states[:1].unsqueeze(1),
+                "joint_f": validation_joint_f[:1].unsqueeze(1),
+            }
+        )
+    if not torch.isfinite(reloaded_prediction).all():
+        raise RuntimeError("Reloaded checkpoint produced non-finite predictions")
+    return validation_mse, test_mse
+
+
+def default_dataset_paths(robot_id):
+    prefix = f"outputs/{robot_id}"
+    return {
+        "train": f"{prefix}_train.hdf5",
+        "validation": f"{prefix}_validation.hdf5",
+        "test": f"{prefix}_test.hdf5",
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate robot HDF5 datasets and smoke-train a NeRD dynamics model"
+    )
+    parser.add_argument("--robot-id", default="so101")
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        choices=("train", "validation", "test"),
+        default=("train", "validation", "test"),
+        help="Dataset splits to generate (default: train validation test)",
+    )
+    parser.add_argument(
+        "--generate-only",
+        action="store_true",
+        help="Generate the selected HDF5 splits without training a model",
+    )
+    parser.add_argument("--num-envs", type=int, default=8)
+    parser.add_argument("--horizon", type=int, default=200)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--default-pose", action="store_true")
+    parser.add_argument("--action-scale", type=float, default=1.0)
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--train-dataset-path")
+    parser.add_argument("--validation-dataset-path")
+    parser.add_argument("--test-dataset-path")
+    parser.add_argument(
+        "--dataset-path",
+        help="Deprecated alias for --train-dataset-path",
+    )
+    parser.add_argument("--checkpoint-path")
+    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--diagnostics", action="store_true")
+    parser.add_argument("--render-backend", choices=("opengl", "rerun"), default="opengl")
+    parser.add_argument("--rerun-view", choices=("3d", "camera"), default="camera")
+    parser.add_argument("--grpc-port", type=int, default=9876)
+    parser.add_argument("--web-port", type=int, default=9090)
+    parser.add_argument("--browser-host", default="localhost")
+    parser.add_argument(
+        "--render-splits",
+        nargs="+",
+        choices=("train", "validation", "test"),
+        default=("train",),
+        help="Splits that should be rendered when --render is enabled",
+    )
+    parser.add_argument("--keep-open", action="store_true")
+    args = parser.parse_args()
+
+    paths = default_dataset_paths(args.robot_id)
+    args.train_dataset_path = args.train_dataset_path or args.dataset_path or paths["train"]
+    args.validation_dataset_path = args.validation_dataset_path or paths["validation"]
+    args.test_dataset_path = args.test_dataset_path or paths["test"]
+    args.checkpoint_path = args.checkpoint_path or f"outputs/{args.robot_id}_nerd_model.pt"
+    if not args.generate_only and not {"train", "validation"}.issubset(args.splits):
+        parser.error("training requires both train and validation in --splits")
+    if args.keep_open and not args.render:
+        parser.error("--keep-open requires --render")
+    if args.keep_open and len(set(args.render_splits).intersection(args.splits)) != 1:
+        parser.error("--keep-open requires exactly one rendered dataset split")
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    torch.manual_seed(args.seed)
+    dimensions = None
+    env = None
+    viewer_env = None
+    try:
+        split_seeds = {split: args.seed + index for index, split in enumerate(args.splits)}
+        for split in args.splits:
+            dataset, state_dim, joint_f_dim, env = collect_dataset(
+                args, device, split, split_seeds[split]
+            )
+            path = getattr(args, f"{split}_dataset_path")
+            write_dataset(path, dataset, args, split, split_seeds[split], state_dim, joint_f_dim)
+            dimensions = (state_dim, joint_f_dim)
+            print(
+                f"generated split={split} transitions={len(dataset['states'])} "
+                f"dataset={path}",
+                flush=True,
+            )
+            if args.keep_open and split in args.render_splits:
+                viewer_env = env
+            else:
+                env.close()
+            env = None
+
+        if args.generate_only:
+            env = viewer_env
+            if env is not None:
+                print("Viewer is running. Press Ctrl+C to exit.", flush=True)
+                while True:
+                    time.sleep(1.0)
+            return
+        if dimensions is None:
+            raise RuntimeError("No dataset dimensions were collected")
+
+        train_dataset = load_dataset(args.train_dataset_path, "train")
+        validation_dataset = load_dataset(args.validation_dataset_path, "validation")
+        test_dataset = (
+            load_dataset(args.test_dataset_path, "test")
+            if "test" in args.splits
+            else None
+        )
+        validation_mse, test_mse = train_and_test(
+            train_dataset,
+            validation_dataset,
+            test_dataset,
+            dimensions[0],
+            dimensions[1],
+            args,
+            device,
+        )
+        test_result = "n/a" if test_mse is None else f"{test_mse:.6g}"
+        print(
+            f"robot={args.robot_id} train={args.train_dataset_path} "
+            f"validation={args.validation_dataset_path} "
+            f"test={args.test_dataset_path if test_dataset is not None else 'not-generated'} "
+            f"checkpoint={args.checkpoint_path} validation_mse={validation_mse:.6g} "
+            f"test_mse={test_result}",
+            flush=True,
+        )
+        if args.keep_open and args.render:
+            env = viewer_env
+            print("Viewer is running. Press Ctrl+C to exit.", flush=True)
+            while True:
+                time.sleep(1.0)
+    finally:
+        if env is not None:
+            env.close()
+
+
+if __name__ == "__main__":
+    main()

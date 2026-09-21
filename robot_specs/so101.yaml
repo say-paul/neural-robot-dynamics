@@ -1,5 +1,5 @@
 robot_id: so101
-asset_source: /home/core/robotics-rl/modules/body/robotstudio_so101/so101.xml
+asset_source: ~/mujoco_menagerie/robotstudio_so101/so101.xml
 base_type: fixed
 dof: 6
 joint_names:

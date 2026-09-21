@@ -396,6 +396,10 @@ class NeuralEnvironment():
                 self.num_envs,
                 self.joint_f_dim
             ))
+            self.joint_f.add_(wp.to_torch(self.env.control.joint_target).view(
+                self.num_envs,
+                self.joint_f_dim
+            ))
         
         # Step forward the environment
         self.env.update()
@@ -464,6 +468,10 @@ class NeuralEnvironment():
         # Assign joint_f to warp
         self.env.joint_f.assign(wp.array(joint_f.reshape(-1)))
         self.joint_f.copy_(wp.to_torch(self.env.control.joint_f).view(
+            self.num_envs,
+            self.joint_f_dim
+        ))
+        self.joint_f.add_(wp.to_torch(self.env.control.joint_target).view(
             self.num_envs,
             self.joint_f_dim
         ))

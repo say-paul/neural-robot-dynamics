@@ -296,7 +296,7 @@ class NeuralSolver(SolverBase):
             "Cannot simulate via neural integrator as "
             "a neural model has not been setup yet."
         )
-        self._update_states(state_in, contacts, control.joint_f)
+        self._update_states(state_in, contacts, control)
 
         torch_stream = wp.stream_to_torch(self.device)
         # NOTE[Jie]: need to remove no_grad if we want the differentiability
@@ -336,15 +336,18 @@ class NeuralSolver(SolverBase):
     Update the states, joint_f, and contacts in neural solver from a warp states.
     """
 
-    def _update_states(self, warp_states: State, contacts: Contacts, joint_f):
+    def _update_states(self, warp_states: State, contacts: Contacts, control: Control):
         self.acquire_states_to_torch(warp_states, self.states)
         self.wrap2PI(self.states)
         self.root_body_q = wp.to_torch(
             warp_states.body_q
         )[0::self.num_bodies_per_env, :]
         if self.joint_f_dim > 0:
-            self.joint_f = wp.to_torch(joint_f).view(
-                self.num_envs, self.joint_f_dim)
+            self.joint_f = wp.to_torch(control.joint_f).view(
+                self.num_envs, self.joint_f_dim
+            ) + wp.to_torch(control.joint_target).view(
+                self.num_envs, self.joint_f_dim
+            )
         self.contacts = self.get_abstract_contacts(contacts)
 
     def get_contact_masks(
@@ -453,7 +456,7 @@ class NeuralSolver(SolverBase):
             )
         
         # apply contact mask
-        if model_inputs["contact_points_1"] is not None:
+        if self.num_contacts_per_env > 0 and model_inputs["contact_points_1"] is not None:
             for key in model_inputs.keys():
                 if key.startswith('contact_'):
                     model_inputs[key] = torch.where(
