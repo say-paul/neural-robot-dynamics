@@ -59,7 +59,7 @@ class StatefulNeuralSolver(NeuralSolver):
                             device=self.torch_device
                         ),
                     'joint_f': 
-                        torch.zeros((self.num_envs, self.model_joint_f_dimjoint_f_dim), 
+                        torch.zeros((self.num_envs, self.model_joint_f_dim), 
                             device=self.torch_device
                         ),
                     'gravity_dir':

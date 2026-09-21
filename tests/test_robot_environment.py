@@ -2,7 +2,13 @@ import numpy as np
 import torch
 
 from envs.neural_environment import NeuralEnvironment
-from examples.example_robot_nerd_train import valid_transition_mask
+from examples.example_robot_nerd_train import (
+    SEQUENCE_LENGTH,
+    create_model,
+    model_config,
+    valid_transition_mask,
+    valid_window_starts,
+)
 from robot_specs import load_robot_spec
 
 
@@ -113,6 +119,32 @@ def test_dataset_transition_filter_rejects_unphysical_samples():
     assert accepted.tolist() == [True, False, False, False]
 
 
+def test_transformer_windows_do_not_cross_rejected_transitions():
+    valid = torch.tensor(
+        [[True] * SEQUENCE_LENGTH + [False] + [True] * SEQUENCE_LENGTH]
+    )
+
+    starts = valid_window_starts(valid)
+
+    assert starts.tolist() == [[0, 0], [0, SEQUENCE_LENGTH + 1]]
+
+
+def test_robot_nerd_model_uses_causal_transformer_history():
+    config = model_config()
+    model = create_model(state_dim=12, joint_f_dim=6, device="cpu")
+
+    prediction = model(
+        {
+            "states_embedding": torch.zeros((2, SEQUENCE_LENGTH, 12)),
+            "joint_f": torch.zeros((2, SEQUENCE_LENGTH, 6)),
+        }
+    )
+
+    assert config["transformer"]["block_size"] >= SEQUENCE_LENGTH
+    assert model.is_transformer
+    assert prediction.shape == (2, SEQUENCE_LENGTH, 12)
+
+
 def test_so101_random_rollout_is_finite_and_records_limit_termination():
     env = NeuralEnvironment(
         env_name="Robot",
@@ -125,6 +157,7 @@ def test_so101_random_rollout_is_finite_and_records_limit_termination():
     try:
         spec = load_robot_spec("so101")
         env.reset()
+        state = env.states
         generator = torch.Generator(device=env.torch_device).manual_seed(123)
         action_limits = torch.as_tensor(spec.action_limits, device=env.torch_device)
         for _ in range(1000):

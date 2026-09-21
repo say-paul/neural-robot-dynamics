@@ -77,7 +77,12 @@ python example_neural_solver_rl.py --rl-cfg ./rl_cfg/Ant/ant_run.yaml --exp-name
 
 ### Robot Data And NeRD Training
 
-The script [`examples/example_robot_nerd_train.py`](examples/example_robot_nerd_train.py) collects independent random ground-truth robot motion into transition-mode HDF5 files for `train`, `validation`, and `test`, trains a compact state-delta NeRD model from the first two files, reloads its `.pt` checkpoint, and evaluates it on the untouched test file. Saturated actuator commands and transitions that begin or end outside joint limits are rejected before writing, so the data contains only physically valid robot motion. The resulting model uses the neural solver input contract `states_embedding + joint_f`, where `joint_f` includes torque commands or position/velocity targets as appropriate, and can be used as the basis for a longer training run.
+The script [`examples/example_robot_nerd_train.py`](examples/example_robot_nerd_train.py) collects random ground-truth robot trajectories into HDF5 files for `train`, `validation`, and `test`. It trains a causal Transformer to predict relative state changes from contiguous 10-step `states_embedding + joint_f` windows, reloads its `.pt` checkpoint, and evaluates it on the untouched test trajectories. Saturated actuator commands and transitions that begin or end outside joint limits are marked invalid, and training windows never cross those invalid transitions. The checkpoint records the Transformer solver and history configuration required by the rollout example.
+
+> [!Important]
+> Older `transition`-mode HDF5 files and MLP checkpoints are not compatible with
+> Transformer training or resume. Regenerate all selected dataset splits before
+> starting a Transformer run.
 
 ```bash
 PYTHONPATH="$PWD" .venv312/bin/python examples/example_robot_nerd_train.py \
@@ -95,6 +100,61 @@ PYTHONPATH="$PWD" .venv312/bin/python examples/example_robot_nerd_train.py \
 ```
 
 Use `--train-dataset-path`, `--validation-dataset-path`, and `--test-dataset-path` to place the files where a NeRD training configuration expects them.
+
+To train from existing trajectory-mode HDF5 files without regenerating or
+overwriting them, use `--skip-generation`. `--resume-checkpoint` continues a
+compatible Transformer for the requested number of additional epochs. A resumed
+checkpoint must have the same robot ID, state and actuator dimensions, input
+contract, architecture, and 10-step history length.
+
+```bash
+PYTHONPATH="$PWD" .venv312/bin/python examples/example_robot_nerd_train.py \
+  --skip-generation --splits train validation test --robot-id so101 \
+  --train-dataset-path outputs/so101_train.hdf5 \
+  --validation-dataset-path outputs/so101_validation.hdf5 \
+  --test-dataset-path outputs/so101_test.hdf5 \
+  --resume-checkpoint outputs/so101_nerd_model.pt \
+  --checkpoint-path outputs/so101_nerd_model.pt \
+  --epochs 1000 --batch-size 256 --learning-rate 1e-3
+```
+
+To simulate the robot with a trained NeRD model, pass the checkpoint to the
+robot rollout example. This switches from Newton ground-truth dynamics to
+`NeuralSolver`; `--random-actions` supplies random normalized control commands,
+while its absence applies zero commands.
+
+```bash
+PYTHONPATH="$PWD" .venv312/bin/python examples/example_robot_rollout.py \
+  --robot-id so101 --num-envs 1 --horizon 500 --default-pose \
+  --nerd-checkpoint outputs/so101_nerd_model.pt \
+  --random-actions --action-scale 0.5
+```
+
+### Sim-to-Real Roadmap
+
+1. **Robot contract:** Verify the SO-101 model asset, joint ordering, limits,
+  position gains, damping, action scale, and control frequency against the
+  physical robot.
+2. **Dynamics data:** Generate separate train, validation, and test HDF5 files
+  from varied initial poses and safe action ranges. Measure one-step and
+  multi-step NeRD rollout error on the untouched test split.
+3. **Robust simulation:** Randomize mass, inertia, damping, friction, motor
+  strength, control latency, sensor noise, payload, and contact properties at
+  every RL episode.
+4. **Policy training:** Train a bounded, smooth policy across that randomized
+  simulation distribution. Test it against held-out parameter combinations,
+  disturbances, and long rollouts.
+5. **Safe hardware evaluation:** Deploy the unchanged policy at conservative
+  speed and workspace limits with an emergency stop and independent limit
+  checks. Record tracking and task metrics.
+6. **Adaptation, if needed:** Use recorded real trajectories to calibrate the
+  simulator or learn NeRD residual dynamics, then retrain or fine-tune. This
+  is sim-to-real adaptation, rather than zero-shot transfer.
+
+Zero-shot sim-to-real means the policy is trained only in simulation and is
+deployed unchanged on the physical robot. The test result in simulation is not
+evidence of zero-shot transfer; it is established only by a separately held-out
+real-robot evaluation.
 
 ## Citation
 

@@ -5,6 +5,34 @@ import time
 import torch
 
 from envs.neural_environment import NeuralEnvironment
+from models.models import ModelMixedInput
+
+
+def load_nerd_model(checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    required = {"state_dim", "joint_f_dim", "input_cfg", "network_cfg", "state_dict"}
+    missing = required.difference(checkpoint)
+    if missing:
+        raise RuntimeError(
+            f"NeRD checkpoint {checkpoint_path} is missing fields: {sorted(missing)}"
+        )
+    input_cfg = {"low_dim": ["states_embedding", "joint_f"]}
+    if checkpoint["input_cfg"] != input_cfg:
+        raise RuntimeError("Robot rollout only supports states_embedding + joint_f inputs")
+    sample = {
+        "states_embedding": torch.zeros((1, 1, checkpoint["state_dim"]), device=device),
+        "joint_f": torch.zeros((1, 1, checkpoint["joint_f_dim"]), device=device),
+    }
+    model = ModelMixedInput(
+        input_sample=sample,
+        output_dim=checkpoint["state_dim"],
+        input_cfg=input_cfg,
+        network_cfg=checkpoint["network_cfg"],
+        device=device,
+    )
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+    return model, checkpoint
 
 
 def main():
@@ -13,6 +41,10 @@ def main():
     parser.add_argument("--num-envs", type=int, default=1)
     parser.add_argument("--horizon", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--nerd-checkpoint",
+        help="Robot NeRD checkpoint created by example_robot_nerd_train.py; enables neural dynamics.",
+    )
     parser.add_argument("--render", action="store_true")
     parser.add_argument(
         "--diagnostics",
@@ -56,6 +88,7 @@ def main():
         help="Rerun view: clean native camera image or experimental 3D scene.",
     )
     args = parser.parse_args()
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     render_config = {}
     if args.render_backend == "rerun":
@@ -72,6 +105,23 @@ def main():
             },
         }
 
+    neural_model = None
+    neural_solver_cfg = None
+    env_mode = "ground-truth"
+    checkpoint = None
+    if args.nerd_checkpoint is not None:
+        neural_model, checkpoint = load_nerd_model(args.nerd_checkpoint, device)
+        solver_name = checkpoint.get("solver_name", "NeuralSolver")
+        neural_solver_cfg = {
+            "name": solver_name,
+            "prediction_type": checkpoint.get("prediction_type", "relative"),
+        }
+        if solver_name == "TransformerNeuralSolver":
+            neural_solver_cfg["num_states_history"] = checkpoint.get(
+                "num_states_history", 10
+            )
+        env_mode = "neural"
+
     env = NeuralEnvironment(
         env_name="Robot",
         num_envs=args.num_envs,
@@ -81,12 +131,20 @@ def main():
             "random_reset": not args.default_pose,
             **render_config,
         },
-        default_env_mode="ground-truth",
-        device="cuda:0" if torch.cuda.is_available() else "cpu",
+        neural_solver_cfg=neural_solver_cfg,
+        neural_model=neural_model,
+        default_env_mode=env_mode,
+        device=device,
         render=args.render,
     )
     try:
+        if checkpoint is not None and (
+            checkpoint["state_dim"] != env.state_dim
+            or checkpoint["joint_f_dim"] != env.joint_f_dim
+        ):
+            raise RuntimeError("NeRD checkpoint dimensions do not match this robot")
         env.reset()
+        state = env.states
         generator = torch.Generator(device=env.torch_device).manual_seed(args.seed + 1)
         for step in range(args.horizon):
             if args.random_actions:
@@ -103,7 +161,7 @@ def main():
                 actions = torch.zeros(
                     (args.num_envs, env.action_dim), device=env.torch_device
                 )
-            state = env.step(actions, env_mode="ground-truth")
+            state = env.step(actions, env_mode=env_mode)
             if args.diagnostics:
                 env.log_robot_diagnostics(step, actions)
             if args.render:
@@ -111,7 +169,7 @@ def main():
         if not torch.isfinite(state).all():
             raise RuntimeError("Robot rollout produced non-finite state")
         print(
-            f"robot={args.robot_id} envs={args.num_envs} horizon={args.horizon} "
+            f"robot={args.robot_id} mode={env_mode} envs={args.num_envs} horizon={args.horizon} "
             f"state_shape={tuple(state.shape)} action_dim={env.action_dim}"
         )
         if args.keep_open and args.render:
