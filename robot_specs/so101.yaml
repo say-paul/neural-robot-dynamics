@@ -66,8 +66,9 @@ gripper:
 solver:
   fps: 200
   sim_substeps: 1
+  integrator: rk4
   gravity: -9.81
   ground_plane: false
   self_collisions: true
-  show_collision_mesh: true
+  show_collision_mesh: false
   njmax: 1024

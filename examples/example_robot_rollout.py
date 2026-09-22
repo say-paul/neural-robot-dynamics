@@ -6,6 +6,7 @@ import torch
 
 from envs.neural_environment import NeuralEnvironment
 from models.models import ModelMixedInput
+from utils.running_mean_std import RunningMeanStd
 
 
 def load_nerd_model(checkpoint_path, device):
@@ -30,6 +31,16 @@ def load_nerd_model(checkpoint_path, device):
         network_cfg=checkpoint["network_cfg"],
         device=device,
     )
+    if checkpoint["network_cfg"].get("normalize_output", False):
+        if "output_mean" not in checkpoint or "output_variance" not in checkpoint:
+            raise RuntimeError("Normalized NeRD checkpoint is missing output statistics")
+        output_rms = RunningMeanStd(
+            shape=tuple(checkpoint["output_mean"].shape), device=device
+        )
+        output_rms.mean = checkpoint["output_mean"].to(device)
+        output_rms.var = checkpoint["output_variance"].to(device)
+        output_rms.count = 1.0
+        model.set_output_rms(output_rms)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
     return model, checkpoint

@@ -63,6 +63,7 @@ def compute_robot_observations(
 def assign_robot_controls(
     actions: wp.array(dtype=wp.float32, ndim=2),
     action_limits: wp.array(dtype=wp.float32, ndim=2),
+    joint_target_limits: wp.array(dtype=wp.float32, ndim=2),
     effort_limits: wp.array(dtype=wp.float32),
     controllable_dofs: wp.array(dtype=wp.int32),
     actuator_mode: int,
@@ -82,6 +83,16 @@ def assign_robot_controls(
         joint_target[dof] = 0.0
         if actuator_mode == ACTUATOR_TORQUE:
             joint_f[dof] = action * effort_limits[index]
+        elif actuator_mode == ACTUATOR_POSITION:
+            action_fraction = (
+                (action - action_limits[index, 0])
+                / (action_limits[index, 1] - action_limits[index, 0])
+            )
+            joint_target[dof] = (
+                joint_target_limits[index, 0]
+                + action_fraction
+                * (joint_target_limits[index, 1] - joint_target_limits[index, 0])
+            )
         else:
             joint_target[dof] = action
 
@@ -129,11 +140,16 @@ class RobotEnvironment(Environment):
         self.frame_dt = 1.0 / self.fps
         self.sim_substeps_mujoco = int(self.robot_spec.solver.get("sim_substeps", 4))
         self.gravity = float(self.robot_spec.solver.get("gravity", -9.81))
+        if "integrator" in self.robot_spec.solver:
+            self.mujoco_settings = dict(self.mujoco_settings)
+            self.mujoco_settings["integrator"] = str(
+                self.robot_spec.solver["integrator"]
+            )
+        if "njmax" in self.robot_spec.solver:
+            self.mujoco_settings = dict(self.mujoco_settings)
+            self.mujoco_settings["njmax"] = int(self.robot_spec.solver["njmax"])
         if kwargs.get("render_mode") == RenderMode.RERUN:
             self.mujoco_settings = dict(self.mujoco_settings)
-            self.mujoco_settings["njmax"] = int(
-                self.robot_spec.solver.get("njmax", 1024)
-            )
             rerun_settings = dict(kwargs.get("rerun_render_settings", {}))
             rerun_settings["native_model_path"] = self.robot_spec.asset_source
             kwargs["rerun_render_settings"] = rerun_settings
@@ -141,6 +157,14 @@ class RobotEnvironment(Environment):
         self.controllable_effort_limits_wp = wp.array(
             [
                 self.robot_spec.effort_limits[self.robot_spec.joint_index[name]]
+                for name in self.robot_spec.controllable_dofs
+            ],
+            dtype=wp.float32,
+            device=self.device,
+        )
+        self.controllable_joint_limits_wp = wp.array(
+            [
+                self.robot_spec.joint_limits[self.robot_spec.joint_index[name]]
                 for name in self.robot_spec.controllable_dofs
             ],
             dtype=wp.float32,
@@ -217,6 +241,7 @@ class RobotEnvironment(Environment):
             inputs=[
                 actions,
                 self.control_limits_wp,
+                self.controllable_joint_limits_wp,
                 self.controllable_effort_limits_wp,
                 self.controllable_dofs_wp,
                 self.actuator_mode_code,

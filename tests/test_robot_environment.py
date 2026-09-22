@@ -87,6 +87,14 @@ def test_so101_applies_explicit_dynamics_and_position_control():
             torch.as_tensor(model.joint_target_ke.numpy()),
             torch.as_tensor(spec.position_gains),
         )
+        env.reset()
+        initial_state = env.states.clone()
+        state = env.step(
+            torch.full((1, env.action_dim), 0.5, device=env.torch_device),
+            env_mode="ground-truth",
+        )
+        assert (state[:, :spec.dof] - initial_state[:, :spec.dof]).abs().max() > 1e-5
+        assert state[:, spec.dof:].abs().max() > 1e-3
     finally:
         env.close()
 
@@ -171,7 +179,9 @@ def test_so101_random_rollout_is_finite_and_records_limit_termination():
         assert torch.isfinite(state).all()
         for env_id, terminated in enumerate(env.terminated.tolist()):
             if terminated:
-                assert env.termination_reasons[env_id].startswith("joint_limit:")
+                assert env.termination_reasons[env_id].startswith(
+                    ("joint_limit:", "velocity_limit:")
+                )
     finally:
         env.close()
 

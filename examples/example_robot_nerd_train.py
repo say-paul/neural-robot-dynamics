@@ -7,10 +7,11 @@ import h5py
 import numpy as np
 import torch
 import torch.nn.functional as functional
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard.writer import SummaryWriter
 
 from envs.neural_environment import NeuralEnvironment
 from models.models import ModelMixedInput
+from utils.running_mean_std import RunningMeanStd
 
 
 SEQUENCE_LENGTH = 10
@@ -41,7 +42,7 @@ def model_config():
             "dropout": 0.0,
         },
         "normalize_input": False,
-        "normalize_output": False,
+        "normalize_output": True,
         "output_tanh": False,
     }
 
@@ -51,13 +52,27 @@ def create_model(state_dim, joint_f_dim, device):
         "states_embedding": torch.zeros((1, 1, state_dim), device=device),
         "joint_f": torch.zeros((1, 1, joint_f_dim), device=device),
     }
-    return ModelMixedInput(
+    model = ModelMixedInput(
         input_sample=sample,
         output_dim=state_dim,
         input_cfg={"low_dim": ["states_embedding", "joint_f"]},
         network_cfg=model_config(),
         device=device,
     )
+    set_output_statistics(
+        model,
+        torch.zeros(state_dim, device=device),
+        torch.ones(state_dim, device=device),
+    )
+    return model
+
+
+def set_output_statistics(model, mean, variance):
+    output_rms = RunningMeanStd(shape=tuple(mean.shape), device=mean.device)
+    output_rms.mean = mean.detach().clone()
+    output_rms.var = variance.detach().clone().clamp_min(1e-12)
+    output_rms.count = 1.0
+    model.set_output_rms(output_rms)
 
 
 def configure_render(args):
@@ -97,6 +112,19 @@ def gather_windows(values, starts, sequence_length=SEQUENCE_LENGTH):
     return values[starts[:, :1], starts[:, 1:] + offsets]
 
 
+def validate_dynamics_signal(dataset, velocity_dim):
+    valid = dataset["valid"].astype(bool)
+    state_delta = (dataset["next_states"] - dataset["states"])[valid]
+    if len(state_delta) == 0:
+        raise RuntimeError("Collected dataset has no valid state transitions")
+    velocity_delta = state_delta[:, -velocity_dim:]
+    if float(np.max(np.abs(velocity_delta))) <= 1e-8:
+        raise RuntimeError(
+            "Collected velocity never changes; ground-truth controls are not "
+            "affecting the dynamics. Check the simulator integrator before training."
+        )
+
+
 def collect_dataset(args, device, split, seed):
     render = args.render and split in args.render_splits
     env = NeuralEnvironment(
@@ -106,6 +134,11 @@ def collect_dataset(args, device, split, seed):
             "robot_spec": args.robot_id,
             "seed": seed,
             "random_reset": not args.default_pose,
+            "env_offset": (
+                (args.env_spacing, 0.0, args.env_spacing)
+                if args.env_spacing > 0.0
+                else (0.0, 0.0, 0.0)
+            ),
             **(configure_render(args) if render else {}),
         },
         default_env_mode="ground-truth",
@@ -131,10 +164,49 @@ def collect_dataset(args, device, split, seed):
             )
             env.reset()
             state = env.states.clone()
+            action = torch.zeros(
+                (args.num_envs, env.action_dim), device=env.torch_device
+            )
+            action_limits = torch.empty(
+                (env.action_dim, 2), dtype=state.dtype, device=env.torch_device
+            )
+            position_control = (
+                hasattr(env.env, "robot_spec")
+                and env.env.robot_spec.actuator_mode == "position"
+            )
+            if position_control:
+                controlled_q_indices = [
+                    env.env.robot_spec.joint_index[name]
+                    for name in env.env.robot_spec.controllable_dofs
+                ]
+                action_limits = torch.as_tensor(
+                    env.action_limits,
+                    dtype=state.dtype,
+                    device=env.torch_device,
+                )
+                joint_limits = torch.as_tensor(
+                    [
+                        env.env.robot_spec.joint_limits[index]
+                        for index in controlled_q_indices
+                    ],
+                    dtype=state.dtype,
+                    device=env.torch_device,
+                )
+                joint_fraction = (
+                    (state[:, controlled_q_indices] - joint_limits[:, 0])
+                    / (joint_limits[:, 1] - joint_limits[:, 0])
+                )
+                action = (
+                    action_limits[:, 0]
+                    + joint_fraction
+                    * (action_limits[:, 1] - action_limits[:, 0])
+                ).clamp(
+                    action_limits[:, 0], action_limits[:, 1]
+                )
             states, actions, joint_forces, next_states, valid = [], [], [], [], []
             for step in range(args.horizon):
                 was_terminated = env.terminated.clone()
-                action = (
+                random_action = (
                     torch.rand(
                         (args.num_envs, env.action_dim),
                         generator=generator,
@@ -142,7 +214,14 @@ def collect_dataset(args, device, split, seed):
                     )
                     * 2.0
                     - 1.0
-                ) * args.action_scale
+                )
+                if position_control:
+                    if step % args.action_hold_steps == 0:
+                        action = (action + random_action * args.action_scale).clamp(
+                            action_limits[:, 0], action_limits[:, 1]
+                        )
+                else:
+                    action = random_action * args.action_scale
                 next_state = env.step(action, env_mode="ground-truth").clone()
                 accepted = valid_transition_mask(
                     was_terminated,
@@ -178,7 +257,7 @@ def collect_dataset(args, device, split, seed):
                 while next_progress <= collected_trajectories:
                     next_progress += args.generation_print_interval
 
-        dataset = {
+        dataset: dict[str, Any] = {
             name: np.concatenate(values, axis=0) for name, values in batches.items()
         }
         if len(valid_window_starts(dataset["valid"])) == 0:
@@ -190,6 +269,7 @@ def collect_dataset(args, device, split, seed):
         dataset["rejected_transitions"] = rejected_transitions
         if not all(np.isfinite(value).all() for value in dataset.values() if isinstance(value, np.ndarray)):
             raise RuntimeError("Collected robot data contains non-finite values")
+        validate_dynamics_signal(dataset, env.dof_qd_per_env)
         return dataset, env.state_dim, env.joint_f_dim, env
     except Exception:
         env.close()
@@ -283,6 +363,10 @@ def resume_training(model, optimizer, args, state_dim, joint_f_dim, device):
         raise RuntimeError("Resume checkpoint history length is incompatible")
     if checkpoint.get("prediction_type") != "relative":
         raise RuntimeError("Resume checkpoint must use relative state prediction")
+    if not torch.allclose(checkpoint.get("output_mean"), model.output_rms.mean):
+        raise RuntimeError("Resume checkpoint output mean does not match the dataset")
+    if not torch.allclose(checkpoint.get("output_variance"), model.output_rms.var):
+        raise RuntimeError("Resume checkpoint output variance does not match the dataset")
 
     model.load_state_dict(checkpoint["state_dict"])
     if "optimizer_state_dict" in checkpoint:
@@ -300,7 +384,8 @@ def evaluate_model(model, dataset, device, batch_size, max_windows=None):
     if max_windows is not None:
         starts = starts[:max_windows]
 
-    squared_error = 0.0
+    physical_squared_error = 0.0
+    normalized_squared_error = 0.0
     element_count = 0
     with torch.no_grad():
         for offset in range(0, len(starts), batch_size):
@@ -314,11 +399,19 @@ def evaluate_model(model, dataset, device, batch_size, max_windows=None):
                     "joint_f": joint_f_windows,
                 }
             )
-            squared_error += functional.mse_loss(
+            physical_squared_error += functional.mse_loss(
                 prediction, target_windows, reduction="sum"
             ).item()
+            normalized_squared_error += functional.mse_loss(
+                model.output_rms.normalize(prediction),
+                model.output_rms.normalize(target_windows),
+                reduction="sum",
+            ).item()
             element_count += target_windows.numel()
-    return squared_error / element_count
+    return (
+        physical_squared_error / element_count,
+        normalized_squared_error / element_count,
+    )
 
 
 def checkpoint_payload(model, optimizer, args, state_dim, joint_f_dim, completed_epochs):
@@ -337,6 +430,8 @@ def checkpoint_payload(model, optimizer, args, state_dim, joint_f_dim, completed
         "state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "completed_epochs": completed_epochs,
+        "output_mean": model.output_rms.mean.detach().cpu(),
+        "output_variance": model.output_rms.var.detach().cpu(),
     }
     if "test" in args.splits:
         checkpoint["test_dataset_path"] = os.path.abspath(args.test_dataset_path)
@@ -359,7 +454,13 @@ def train_and_test(train_dataset, validation_dataset, test_dataset,
     if len(train_starts) == 0:
         raise ValueError(f"Training dataset has no valid {SEQUENCE_LENGTH}-step sequences")
 
+    train_valid = torch.from_numpy(train_dataset["valid"]).to(device=device, dtype=torch.bool)
+    valid_train_targets = train_targets[train_valid]
+    output_mean = valid_train_targets.mean(dim=0)
+    output_variance = valid_train_targets.var(dim=0, unbiased=False)
+    del valid_train_targets, train_valid
     model = create_model(state_dim, joint_f_dim, device)
+    set_output_statistics(model, output_mean, output_variance)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     start_epoch = resume_training(
         model, optimizer, args, state_dim, joint_f_dim, device
@@ -387,21 +488,29 @@ def train_and_test(train_dataset, validation_dataset, test_dataset,
                 "joint_f": joint_f_windows,
             }
         )
-        loss = functional.mse_loss(prediction, target_windows)
+        output_rms = model.output_rms
+        if output_rms is None:
+            raise RuntimeError("Output normalization statistics are not configured")
+        normalized_prediction = output_rms.normalize(prediction)
+        normalized_target = output_rms.normalize(target_windows)
+        loss = functional.mse_loss(normalized_prediction, normalized_target)
+        physical_loss = functional.mse_loss(prediction, target_windows)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         epoch_number = epoch + 1
         train_loss = float(loss.detach().cpu())
+        train_physical_loss = float(physical_loss.detach().cpu())
         learning_rate = float(optimizer.param_groups[0]["lr"])
         if writer is not None:
-            writer.add_scalar("loss/train", train_loss, epoch_number)
+            writer.add_scalar("loss/train_normalized", train_loss, epoch_number)
+            writer.add_scalar("loss/train_physical", train_physical_loss, epoch_number)
             writer.add_scalar("optimizer/learning_rate", learning_rate, epoch_number)
 
-        validation_loss = None
+        validation_metrics = None
         if epoch_number % args.validation_interval == 0 or epoch_number == end_epoch:
             model.eval()
-            validation_loss = evaluate_model(
+            validation_metrics = evaluate_model(
                 model,
                 validation_dataset,
                 device,
@@ -410,17 +519,26 @@ def train_and_test(train_dataset, validation_dataset, test_dataset,
             )
             model.train()
             if writer is not None:
-                writer.add_scalar("loss/validation", validation_loss, epoch_number)
+                writer.add_scalar(
+                    "loss/validation_physical", validation_metrics[0], epoch_number
+                )
+                writer.add_scalar(
+                    "loss/validation_normalized", validation_metrics[1], epoch_number
+                )
 
-        if epoch_number % args.print_interval == 0 or validation_loss is not None:
+        if epoch_number % args.print_interval == 0 or validation_metrics is not None:
             validation_text = (
                 ""
-                if validation_loss is None
-                else f" validation_mse={validation_loss:.6g}"
+                if validation_metrics is None
+                else (
+                    f" validation_normalized_mse={validation_metrics[1]:.6g}"
+                    f" validation_physical_mse={validation_metrics[0]:.6g}"
+                )
             )
             print(
                 f"epoch={epoch_number} learning_rate={learning_rate:.6g} "
-                f"train_mse={train_loss:.6g}{validation_text}",
+                f"train_normalized_mse={train_loss:.6g} "
+                f"train_physical_mse={train_physical_loss:.6g}{validation_text}",
                 flush=True,
             )
         if epoch_number % args.checkpoint_interval == 0:
@@ -440,13 +558,16 @@ def train_and_test(train_dataset, validation_dataset, test_dataset,
             rr.log("robot/training/mse", rr.Scalars(float(loss.detach().cpu())))
 
     model.eval()
-    validation_mse = evaluate_model(
+    validation_mse, validation_normalized_mse = evaluate_model(
         model, validation_dataset, device, args.batch_size
     )
     if not np.isfinite(validation_mse):
         raise RuntimeError("Validation produced a non-finite loss")
     if writer is not None:
-        writer.add_scalar("loss/validation_full", validation_mse, end_epoch)
+        writer.add_scalar("loss/validation_full_physical", validation_mse, end_epoch)
+        writer.add_scalar(
+            "loss/validation_full_normalized", validation_normalized_mse, end_epoch
+        )
 
     checkpoint = checkpoint_payload(
         model,
@@ -457,18 +578,26 @@ def train_and_test(train_dataset, validation_dataset, test_dataset,
         end_epoch,
     )
     if test_dataset is not None:
-        test_mse = evaluate_model(model, test_dataset, device, args.batch_size)
+        test_mse, test_normalized_mse = evaluate_model(
+            model, test_dataset, device, args.batch_size
+        )
         if not np.isfinite(test_mse):
             raise RuntimeError("Test produced a non-finite loss")
         checkpoint["test_dataset_path"] = os.path.abspath(args.test_dataset_path)
         if writer is not None:
-            writer.add_scalar("loss/test", test_mse, end_epoch)
+            writer.add_scalar("loss/test_physical", test_mse, end_epoch)
+            writer.add_scalar("loss/test_normalized", test_normalized_mse, end_epoch)
     else:
         test_mse = None
     os.makedirs(os.path.dirname(os.path.abspath(args.checkpoint_path)), exist_ok=True)
     torch.save(checkpoint, args.checkpoint_path)
     loaded = torch.load(args.checkpoint_path, map_location=device, weights_only=True)
     reloaded_model = create_model(loaded["state_dim"], loaded["joint_f_dim"], device)
+    set_output_statistics(
+        reloaded_model,
+        loaded["output_mean"].to(device),
+        loaded["output_variance"].to(device),
+    )
     reloaded_model.load_state_dict(loaded["state_dict"])
     reloaded_model.eval()
     validation_states = torch.from_numpy(validation_dataset["states"]).to(device)
@@ -531,6 +660,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--default-pose", action="store_true")
     parser.add_argument("--action-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--action-hold-steps",
+        type=int,
+        default=20,
+        help="Steps to hold each random-walk target for position-controlled robots",
+    )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument(
         "--target-epochs",
@@ -565,6 +700,12 @@ def main():
     )
     parser.add_argument("--checkpoint-path")
     parser.add_argument("--render", action="store_true")
+    parser.add_argument(
+        "--env-spacing",
+        type=float,
+        default=0.0,
+        help="X/Z spacing between parallel robots; use about 1.0 for 3D visualization",
+    )
     parser.add_argument("--diagnostics", action="store_true")
     parser.add_argument("--render-backend", choices=("opengl", "rerun"), default="opengl")
     parser.add_argument("--rerun-view", choices=("3d", "camera"), default="camera")
@@ -590,6 +731,10 @@ def main():
         parser.error("--generate-only and --skip-generation cannot be used together")
     if args.num_trajectories is not None and args.num_trajectories < 1:
         parser.error("--num-trajectories must be positive")
+    if args.action_hold_steps < 1:
+        parser.error("--action-hold-steps must be positive")
+    if args.env_spacing < 0.0:
+        parser.error("--env-spacing cannot be negative")
     if args.target_epochs is not None and args.target_epochs < 0:
         parser.error("--target-epochs cannot be negative")
     if (

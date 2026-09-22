@@ -149,11 +149,25 @@ class ViewerRerun(NewtonViewerRerun):
             )
             grouped_xforms.setdefault(shape_hash, []).append(incoming_np[shape_index])
 
-        self._incoming_xforms = {
-            self._shape_instances[shape_hash].name: np.asarray(values, dtype=np.float32)
-            for shape_hash, values in grouped_xforms.items()
-            if shape_hash in self._shape_instances
-        }
+        for shape_hash, values in grouped_xforms.items():
+            if shape_hash not in self._shape_instances:
+                continue
+            batch = self._shape_instances[shape_hash]
+            incoming = np.asarray(values, dtype=np.float32)
+            local = batch.xforms.numpy()
+            if len(incoming) != len(local):
+                continue
+            corrected = np.empty_like(local)
+            corrected[:, :3] = incoming[:, :3] + self._rotate_vectors(
+                incoming[:, 3:7], local[:, :3]
+            )
+            corrected[:, 3:7] = self._multiply_quaternions(
+                incoming[:, 3:7], local[:, 3:7]
+            )
+            batch.xforms = wp.array(
+                corrected, dtype=wp.transform, device=batch.device
+            )
+            batch.world_xforms = wp.zeros_like(batch.xforms)
 
     def log_mesh(
         self,
@@ -212,25 +226,6 @@ class ViewerRerun(NewtonViewerRerun):
             )
         )
 
-    def _apply_incoming_xforms(self, name, xforms):
-        incoming = self._incoming_xforms.get(name)
-        if incoming is None or len(incoming) != len(xforms):
-            return xforms
-
-        world = xforms.numpy()
-        incoming_position = incoming[:, :3]
-        incoming_quaternion = incoming[:, 3:7]
-        world_position = world[:, :3]
-        world_quaternion = world[:, 3:7]
-        corrected = np.empty_like(world)
-        corrected[:, :3] = incoming_position + self._rotate_vectors(
-            incoming_quaternion, world_position
-        )
-        corrected[:, 3:7] = self._multiply_quaternions(
-            incoming_quaternion, world_quaternion
-        )
-        return wp.array(corrected, dtype=wp.transform, device=xforms.device)
-
     def log_instances(
         self,
         name,
@@ -243,7 +238,6 @@ class ViewerRerun(NewtonViewerRerun):
     ):
         if hidden:
             return
-        xforms = self._apply_incoming_xforms(name, xforms)
         if xforms is not None:
             xforms_np = xforms.numpy()
             quaternions = xforms_np[:, 3:7]

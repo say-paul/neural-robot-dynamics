@@ -145,6 +145,11 @@ class NeuralEnvironment():
             dtype=torch.bool,
             device=self.torch_device,
         )
+        self.velocity_limit_violation_mask = torch.zeros(
+            (self.num_envs, self.dof_qd_per_env),
+            dtype=torch.bool,
+            device=self.torch_device,
+        )
         self.terminated = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.torch_device
         )
@@ -429,20 +434,36 @@ class NeuralEnvironment():
             device=self.states.device,
         )
         q = self.states[:, : self.dof_q_per_env]
-        violations = (q < joint_limits[:, 0]) | (q > joint_limits[:, 1])
-        self.joint_limit_violation_mask = violations
-        newly_terminated = violations.any(dim=1) & ~self.terminated
+        joint_violations = (q < joint_limits[:, 0]) | (q > joint_limits[:, 1])
+        self.joint_limit_violation_mask = joint_violations
+        velocity_limits = torch.as_tensor(
+            spec.velocity_limits,
+            dtype=self.states.dtype,
+            device=self.states.device,
+        )
+        qd = self.states[:, self.dof_q_per_env:]
+        velocity_violations = qd.abs() > velocity_limits
+        self.velocity_limit_violation_mask = velocity_violations
+        violations = joint_violations.any(dim=1) | velocity_violations.any(dim=1)
+        newly_terminated = violations & ~self.terminated
         for env_id in torch.where(newly_terminated)[0].tolist():
-            joint_id = int(torch.where(violations[env_id])[0][0])
-            self.termination_reasons[env_id] = (
-                f"joint_limit:{spec.joint_names[joint_id]}"
-            )
-        self.terminated |= violations.any(dim=1)
+            if joint_violations[env_id].any():
+                joint_id = int(torch.where(joint_violations[env_id])[0][0])
+                self.termination_reasons[env_id] = (
+                    f"joint_limit:{spec.joint_names[joint_id]}"
+                )
+            else:
+                joint_id = int(torch.where(velocity_violations[env_id])[0][0])
+                self.termination_reasons[env_id] = (
+                    f"velocity_limit:{spec.joint_names[joint_id]}"
+                )
+        self.terminated |= violations
 
     def _reset_robot_contract_status(self):
         self.action_saturation_mask.zero_()
         self.action_saturation_count.zero_()
         self.joint_limit_violation_mask.zero_()
+        self.velocity_limit_violation_mask.zero_()
         self.terminated.zero_()
         self.termination_reasons = [None] * self.num_envs
 
