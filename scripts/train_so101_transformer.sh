@@ -25,6 +25,7 @@ AUTO_RESUME="${AUTO_RESUME:-1}"
 REGENERATE="${REGENERATE:-0}"
 
 RUN_NAME="${RUN_NAME:-so101_transformer_${TOTAL_TRAJECTORIES}}"
+TRAINING_CONFIG="${TRAINING_CONFIG:-so101}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/outputs/$RUN_NAME}"
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/outputs/tensorboard/$RUN_NAME}"
 TRAIN_DATASET="$OUTPUT_DIR/train.hdf5"
@@ -105,6 +106,7 @@ generate_split() {
         --generate-only \
         --splits "$split" \
         --robot-id so101 \
+        --training-config "$TRAINING_CONFIG" \
         --num-envs "$PARALLEL_ENVS" \
         --num-trajectories "$count" \
         --horizon "$HORIZON" \
@@ -123,32 +125,16 @@ generate_data() {
 }
 
 train_model() {
-    local resume_args=()
-    if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then
-        resume_args=(--resume-checkpoint "$RESUME_CHECKPOINT")
-    elif [[ "$AUTO_RESUME" == "1" && -s "$LATEST_CHECKPOINT" ]]; then
-        echo "Resuming from periodic checkpoint: $LATEST_CHECKPOINT"
-        resume_args=(--resume-checkpoint "$LATEST_CHECKPOINT")
-    fi
-
-    "$PYTHON" "$ROOT_DIR/examples/example_robot_nerd_train.py" \
-        --skip-generation \
-        --splits train validation test \
-        --robot-id so101 \
-        --seed "$SEED" \
-        --target-epochs "$TRAINING_STEPS" \
+    "$PYTHON" -m training.train \
+        --config "$TRAINING_CONFIG" \
+        --train-dataset "$TRAIN_DATASET" \
+        --validation-dataset "$VALIDATION_DATASET" \
+        --test-dataset "$TEST_DATASET" \
+        --checkpoint "$CHECKPOINT" \
+        --steps "$TRAINING_STEPS" \
         --batch-size "$BATCH_SIZE" \
         --learning-rate "$LEARNING_RATE" \
-        --validation-interval "$VALIDATION_INTERVAL" \
-        --validation-windows "$VALIDATION_WINDOWS" \
-        --print-interval "$PRINT_INTERVAL" \
-        --checkpoint-interval "$CHECKPOINT_INTERVAL" \
-        --log-dir "$LOG_DIR" \
-        --train-dataset-path "$TRAIN_DATASET" \
-        --validation-dataset-path "$VALIDATION_DATASET" \
-        --test-dataset-path "$TEST_DATASET" \
-        --checkpoint-path "$CHECKPOINT" \
-        "${resume_args[@]}"
+        --seed "$SEED"
 
     echo "Checkpoint: $CHECKPOINT"
     echo "View losses: $0 tensorboard"

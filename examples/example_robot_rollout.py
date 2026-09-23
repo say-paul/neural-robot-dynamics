@@ -7,10 +7,29 @@ import torch
 from envs.neural_environment import NeuralEnvironment
 from models.models import ModelMixedInput
 from utils.running_mean_std import RunningMeanStd
+from training.model_factory import build_model
 
 
 def load_nerd_model(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    if checkpoint.get("format") == "nerd_sequence_v3":
+        model = build_model(
+            checkpoint["input_dimensions"],
+            checkpoint["output_dim"],
+            checkpoint["training_config"],
+            device,
+        )
+        if model.output_rms is not None:
+            model.output_rms.mean = checkpoint["output_mean"].to(device)
+            model.output_rms.var = checkpoint["output_variance"].to(device)
+        model.load_state_dict(checkpoint["state_dict"])
+        model.eval()
+        checkpoint.setdefault("state_dim", checkpoint["output_dim"])
+        checkpoint.setdefault("joint_f_dim", checkpoint["input_dimensions"]["joint_f"])
+        checkpoint.setdefault("solver_name", "TransformerNeuralSolver")
+        checkpoint.setdefault("prediction_type", "relative")
+        checkpoint.setdefault("num_states_history", checkpoint["training_config"]["sequence"]["length"])
+        return model, checkpoint
     required = {"state_dim", "joint_f_dim", "input_cfg", "network_cfg", "state_dict"}
     missing = required.difference(checkpoint)
     if missing:

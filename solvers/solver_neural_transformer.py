@@ -44,6 +44,7 @@ class TransformerNeuralSolver(StatefulNeuralSolver):
                 'states': torch.zeros_like(self.states).unsqueeze(1),
                 'states_embedding': torch.zeros_like(self.states_embedding).unsqueeze(1),
                 'joint_f': torch.zeros_like(self.joint_f[..., -self.model_joint_f_dim:]).unsqueeze(1),
+                'self_contact': torch.zeros_like(self.self_contact).unsqueeze(1),
                 "gravity_dir": torch.zeros_like(self.gravity_dir).unsqueeze(1),
                 **self.contacts
             }

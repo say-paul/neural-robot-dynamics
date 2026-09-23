@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import time
 from typing import Any
@@ -11,6 +12,8 @@ from torch.utils.tensorboard.writer import SummaryWriter
 
 from envs.neural_environment import NeuralEnvironment
 from models.models import ModelMixedInput
+from training.config import load_training_config
+from training.contact_backends import mujoco_warp_features
 from utils.running_mean_std import RunningMeanStd
 
 
@@ -146,6 +149,10 @@ def collect_dataset(args, device, split, seed):
         render=render,
     )
     try:
+        contact_config = args.training_config_data["contact"]
+        collect_contacts = bool(contact_config["enabled"])
+        if collect_contacts and contact_config["backend"] != "mujoco_warp":
+            raise ValueError(f"Unsupported contact backend: {contact_config['backend']}")
         num_trajectories = args.num_trajectories or args.num_envs
         generator = torch.Generator(device=env.torch_device).manual_seed(seed + 1)
         batches = {
@@ -155,6 +162,8 @@ def collect_dataset(args, device, split, seed):
             "next_states": [],
             "valid": [],
         }
+        if collect_contacts:
+            batches["self_contact"] = []
         rejected_transitions = 0
         collected_trajectories = 0
         next_progress = min(args.generation_print_interval, num_trajectories)
@@ -204,6 +213,10 @@ def collect_dataset(args, device, split, seed):
                     action_limits[:, 0], action_limits[:, 1]
                 )
             states, actions, joint_forces, next_states, valid = [], [], [], [], []
+            contacts = []
+            contact_features = np.zeros(
+                (args.num_envs, contact_config["max_contacts"] * 8), dtype=np.float32
+            )
             for step in range(args.horizon):
                 was_terminated = env.terminated.clone()
                 random_action = (
@@ -234,6 +247,8 @@ def collect_dataset(args, device, split, seed):
                 states.append(state[:batch_trajectories].cpu())
                 actions.append(action[:batch_trajectories].cpu())
                 joint_forces.append(env.joint_f[:batch_trajectories].cpu())
+                if collect_contacts:
+                    contacts.append(torch.from_numpy(contact_features[:batch_trajectories]))
                 next_states.append(next_state[:batch_trajectories].cpu())
                 valid.append(accepted[:batch_trajectories].cpu())
                 if args.diagnostics and render:
@@ -241,12 +256,21 @@ def collect_dataset(args, device, split, seed):
                 if render:
                     env.render()
                 state = next_state
+                if collect_contacts:
+                    contact_features = mujoco_warp_features(
+                        env.solver_gt,
+                        num_envs=args.num_envs,
+                        features=contact_config["features"],
+                        max_contacts=contact_config["max_contacts"],
+                    )
 
             batches["states"].append(torch.stack(states, dim=1).numpy())
             batches["actions"].append(torch.stack(actions, dim=1).numpy())
             batches["joint_f"].append(torch.stack(joint_forces, dim=1).numpy())
             batches["next_states"].append(torch.stack(next_states, dim=1).numpy())
             batches["valid"].append(torch.stack(valid, dim=1).numpy())
+            if collect_contacts:
+                batches["self_contact"].append(torch.stack(contacts, dim=1).numpy())
             collected_trajectories += batch_trajectories
             if collected_trajectories >= next_progress or collected_trajectories == num_trajectories:
                 print(
@@ -292,6 +316,12 @@ def write_dataset(path, dataset, args, split, seed, state_dim, joint_f_dim):
         group.attrs["joint_f_dim"] = joint_f_dim
         group.attrs["state_target"] = "next_states - states"
         group.attrs["rejected_transitions"] = dataset["rejected_transitions"]
+        group.attrs["training_schema_version"] = int(
+            args.training_config_data["schema_version"]
+        )
+        group.attrs["training_inputs"] = json.dumps(
+            args.training_config_data["inputs"]["low_dim"]
+        )
         for name, value in dataset.items():
             if name == "rejected_transitions":
                 continue
@@ -633,6 +663,10 @@ def main():
     )
     parser.add_argument("--robot-id", default="so101")
     parser.add_argument(
+        "--training-config",
+        help="Training profile path or robot profile name (defaults to --robot-id).",
+    )
+    parser.add_argument(
         "--splits",
         nargs="+",
         choices=("train", "validation", "test"),
@@ -721,6 +755,12 @@ def main():
     )
     parser.add_argument("--keep-open", action="store_true")
     args = parser.parse_args()
+    args.training_config_data = load_training_config(
+        args.training_config or args.robot_id
+    )
+    config_robot = args.training_config_data.get("robot_id")
+    if config_robot is not None and config_robot != args.robot_id:
+        parser.error("--training-config robot_id must match --robot-id")
 
     paths = default_dataset_paths(args.robot_id)
     args.train_dataset_path = args.train_dataset_path or args.dataset_path or paths["train"]

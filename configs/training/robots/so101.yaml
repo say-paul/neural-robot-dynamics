@@ -1,0 +1,19 @@
+extends: ../base_transformer.yaml
+robot_id: so101
+
+inputs:
+  low_dim: [states_embedding, joint_f, self_contact]
+
+dataset:
+  action_scale: 0.01
+  action_hold_steps: 20
+
+contact:
+  enabled: true
+  backend: mujoco_warp
+  max_contacts: 8
+  features: [active, separation, normal, position]
+
+projection:
+  enabled: true
+  solver_steps: 1

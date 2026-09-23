@@ -148,6 +148,11 @@ class RobotEnvironment(Environment):
         if "njmax" in self.robot_spec.solver:
             self.mujoco_settings = dict(self.mujoco_settings)
             self.mujoco_settings["njmax"] = int(self.robot_spec.solver["njmax"])
+        if "ncon_per_env" in self.robot_spec.solver:
+            self.mujoco_settings = dict(self.mujoco_settings)
+            self.mujoco_settings["ncon_per_env"] = int(
+                self.robot_spec.solver["ncon_per_env"]
+            )
         if kwargs.get("render_mode") == RenderMode.RERUN:
             self.mujoco_settings = dict(self.mujoco_settings)
             rerun_settings = dict(kwargs.get("rerun_render_settings", {}))

@@ -38,6 +38,7 @@ from solvers import (
 from utils import warp_utils
 from utils.python_utils import print_info, print_warning
 from utils.env_utils import create_fixed_contact_env
+from training.contact_backends import mujoco_warp_features
 
 class NeuralEnvironment():
     def __init__(
@@ -407,6 +408,21 @@ class NeuralEnvironment():
             ))
         
         # Step forward the environment
+        contact_config = getattr(self.solver_neural.neural_model, "training_config", {}).get("contact", {})
+        if env_mode == "neural" and contact_config.get("enabled"):
+            if contact_config.get("backend") != "mujoco_warp":
+                raise RuntimeError("Unsupported neural rollout contact backend")
+            self.solver_gt.update_mjc_data(self.solver_gt.mjw_data, self.env.model, self.env.state)
+            self.solver_gt._mujoco_warp.forward(self.solver_gt.mjw_model, self.solver_gt.mjw_data)
+            self.solver_neural.self_contact = torch.as_tensor(
+                mujoco_warp_features(
+                    self.solver_gt,
+                    num_envs=self.num_envs,
+                    features=contact_config["features"],
+                    max_contacts=contact_config["max_contacts"],
+                ),
+                device=self.torch_device,
+            )
         self.env.update()
 
         # Update states

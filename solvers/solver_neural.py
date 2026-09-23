@@ -139,6 +139,10 @@ class NeuralSolver(SolverBase):
         self.num_joints_per_env = model.joint_count // self.num_envs
         self.num_bodies_per_env = model.body_count // self.num_envs
         self.joint_f_dim = self.model.joint_f.shape[0] // self.num_envs
+        self.self_contact = torch.zeros(
+            (self.num_envs, getattr(neural_model, "input_dimensions", {}).get("self_contact", 0)),
+            device=self.torch_device,
+        )
         
         self.num_contacts_per_env = model.num_contacts_per_env
         
@@ -483,6 +487,7 @@ class NeuralSolver(SolverBase):
             "states": self.states,
             "states_embedding": self.states_embedding,
             "joint_f": self.joint_f[..., -self.model_joint_f_dim:],
+            "self_contact": self.self_contact,
             "gravity_dir": self.gravity_dir,
             **self.contacts
         }

@@ -1,0 +1,6 @@
+extends: ../base_transformer.yaml
+robot_id: franka_panda
+
+dataset:
+  action_scale: 0.1
+  action_hold_steps: 10

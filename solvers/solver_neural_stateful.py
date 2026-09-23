@@ -62,6 +62,7 @@ class StatefulNeuralSolver(NeuralSolver):
                         torch.zeros((self.num_envs, self.model_joint_f_dim), 
                             device=self.torch_device
                         ),
+                    'self_contact': torch.zeros_like(self.self_contact),
                     'gravity_dir':
                         torch.zeros((self.num_envs, 3),
                             device=self.torch_device
@@ -82,6 +83,7 @@ class StatefulNeuralSolver(NeuralSolver):
                 "states": self.states.clone(),
                 "states_embedding": self.states_embedding.clone(),
                 "joint_f": self.joint_f[..., -self.model_joint_f_dim:].clone(),
+                "self_contact": self.self_contact.clone(),
                 "gravity_dir": self.gravity_dir.clone(),
                 **self.contacts
             })

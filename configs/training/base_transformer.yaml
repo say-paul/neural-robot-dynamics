@@ -1,0 +1,44 @@
+schema_version: 1
+
+inputs:
+  low_dim: [states_embedding, joint_f]
+
+sequence:
+  length: 10
+
+network:
+  encoder:
+    low_dim:
+      activation: relu
+      layer_sizes: []
+      layernorm: false
+  model:
+    mlp:
+      activation: relu
+      layer_sizes: [64]
+      layernorm: false
+  transformer:
+    n_layer: 6
+    n_head: 12
+    n_embd: 192
+    block_size: 32
+    bias: false
+    dropout: 0.0
+  normalize_input: false
+  normalize_output: true
+  output_tanh: false
+
+optimization:
+  learning_rate: 0.001
+  batch_size: 512
+  gradient_norm: 1.0
+
+contact:
+  enabled: false
+  backend: none
+  max_contacts: 0
+  features: []
+
+projection:
+  enabled: false
+  solver_steps: 1
