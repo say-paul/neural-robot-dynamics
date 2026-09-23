@@ -13,6 +13,8 @@ contact:
   backend: mujoco_warp
   max_contacts: 8
   features: [active, separation, normal, position]
+  reject_separation_below: -0.002
+  reject_nonfinite: true
 
 projection:
   enabled: true

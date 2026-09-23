@@ -99,6 +99,27 @@ def valid_transition_mask(was_terminated, action_saturation_mask, is_terminated)
     return ~(was_terminated | action_saturation_mask | is_terminated)
 
 
+def contact_transition_mask(contact_features, contact_config):
+    if not contact_config["enabled"]:
+        return torch.ones(
+            contact_features.shape[0], dtype=torch.bool, device=contact_features.device
+        )
+    if contact_config.get("reject_nonfinite", True) and not torch.isfinite(contact_features).all():
+        finite = torch.isfinite(contact_features).all(dim=1)
+    else:
+        finite = torch.ones(
+            contact_features.shape[0], dtype=torch.bool, device=contact_features.device
+        )
+    slot_width = 8
+    slots = contact_features.view(contact_features.shape[0], -1, slot_width)
+    active = slots[..., 0] > 0.5
+    separation = slots[..., 1]
+    penetration = active & (
+        separation < float(contact_config.get("reject_separation_below", -float("inf")))
+    )
+    return finite & ~penetration.any(dim=1)
+
+
 def valid_window_starts(valid, sequence_length=SEQUENCE_LENGTH):
     valid = torch.as_tensor(valid, dtype=torch.bool)
     if valid.ndim != 2:
@@ -167,6 +188,10 @@ def collect_dataset(args, device, split, seed):
         rejected_transitions = 0
         collected_trajectories = 0
         next_progress = min(args.generation_print_interval, num_trajectories)
+        print(
+            f"collecting split={split} trajectories=0/{num_trajectories}",
+            flush=True,
+        )
         while collected_trajectories < num_trajectories:
             batch_trajectories = min(
                 args.num_envs, num_trajectories - collected_trajectories
@@ -236,10 +261,32 @@ def collect_dataset(args, device, split, seed):
                 else:
                     action = random_action * args.action_scale
                 next_state = env.step(action, env_mode="ground-truth").clone()
+                if collect_contacts:
+                    contact_features = mujoco_warp_features(
+                        env.solver_gt,
+                        num_envs=args.num_envs,
+                        features=contact_config["features"],
+                        max_contacts=contact_config["max_contacts"],
+                    )
+                    contact_tensor = torch.from_numpy(contact_features).to(
+                        device=env.torch_device
+                    )
+                    contact_valid = contact_transition_mask(
+                        contact_tensor, contact_config
+                    )
+                else:
+                    contact_valid = torch.ones(
+                        args.num_envs, dtype=torch.bool, device=env.torch_device
+                    )
                 accepted = valid_transition_mask(
                     was_terminated,
                     env.action_saturation_mask,
                     env.terminated,
+                ) & contact_valid
+                accepted &= (
+                    torch.isfinite(action).all(dim=1)
+                    & torch.isfinite(state).all(dim=1)
+                    & torch.isfinite(next_state).all(dim=1)
                 )
                 rejected_transitions += int(
                     (~accepted[:batch_trajectories]).sum().item()
@@ -256,13 +303,6 @@ def collect_dataset(args, device, split, seed):
                 if render:
                     env.render()
                 state = next_state
-                if collect_contacts:
-                    contact_features = mujoco_warp_features(
-                        env.solver_gt,
-                        num_envs=args.num_envs,
-                        features=contact_config["features"],
-                        max_contacts=contact_config["max_contacts"],
-                    )
 
             batches["states"].append(torch.stack(states, dim=1).numpy())
             batches["actions"].append(torch.stack(actions, dim=1).numpy())
@@ -275,7 +315,9 @@ def collect_dataset(args, device, split, seed):
             if collected_trajectories >= next_progress or collected_trajectories == num_trajectories:
                 print(
                     f"collecting split={split} trajectories="
-                    f"{collected_trajectories}/{num_trajectories}",
+                    f"{collected_trajectories}/{num_trajectories} "
+                    f"valid={int(sum(batch.sum() for batch in batches['valid']))} "
+                    f"rejected={rejected_transitions}",
                     flush=True,
                 )
                 while next_progress <= collected_trajectories:

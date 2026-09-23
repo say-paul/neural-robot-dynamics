@@ -8,7 +8,7 @@ MODE="${1:-all}"
 # 625k total gives an exact 500k / 62.5k / 62.5k (80/10/10) split.
 TOTAL_TRAJECTORIES="${TOTAL_TRAJECTORIES:-625000}"
 HORIZON="${HORIZON:-100}"
-PARALLEL_ENVS="${PARALLEL_ENVS:-64}"
+PARALLEL_ENVS="${PARALLEL_ENVS:-128}"
 ACTION_SCALE="${ACTION_SCALE:-0.01}"
 ACTION_HOLD_STEPS="${ACTION_HOLD_STEPS:-20}"
 SEED="${SEED:-42}"
@@ -21,6 +21,12 @@ VALIDATION_WINDOWS="${VALIDATION_WINDOWS:-4096}"
 PRINT_INTERVAL="${PRINT_INTERVAL:-1000}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-10000}"
 TENSORBOARD_PORT="${TENSORBOARD_PORT:-6006}"
+RENDER="${RENDER:-0}"
+KEEP_OPEN="${KEEP_OPEN:-0}"
+RENDER_SPLITS="${RENDER_SPLITS:-train}"
+RERUN_GRPC_PORT="${RERUN_GRPC_PORT:-19878}"
+RERUN_WEB_PORT="${RERUN_WEB_PORT:-19092}"
+RERUN_BROWSER_HOST="${RERUN_BROWSER_HOST:-localhost}"
 AUTO_RESUME="${AUTO_RESUME:-1}"
 REGENERATE="${REGENERATE:-0}"
 
@@ -55,6 +61,23 @@ TRAIN_WINDOWS=$((TRAIN_TRAJECTORIES * (HORIZON - 10 + 1)))
 STEPS_PER_PASS=$(((TRAIN_WINDOWS + BATCH_SIZE - 1) / BATCH_SIZE))
 SAMPLED_WINDOWS=$((TRAINING_STEPS * BATCH_SIZE))
 
+RENDER_ARGS=()
+if [[ "$RENDER" == "1" ]]; then
+    RENDER_ARGS=(
+        --render
+        --render-backend rerun
+        --rerun-view camera
+        --render-splits "$RENDER_SPLITS"
+        --grpc-port "$RERUN_GRPC_PORT"
+        --web-port "$RERUN_WEB_PORT"
+        --browser-host "$RERUN_BROWSER_HOST"
+        --diagnostics
+    )
+    if [[ "$KEEP_OPEN" == "1" ]]; then
+        RENDER_ARGS+=(--keep-open)
+    fi
+fi
+
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -86,6 +109,7 @@ SO-101 Transformer NeRD pipeline
     sampled windows:        $SAMPLED_WINDOWS
   output:                 $OUTPUT_DIR
   TensorBoard logs:       $LOG_DIR
+    Rerun rendering:        $RENDER (splits: $RENDER_SPLITS)
 EOF
 }
 
@@ -114,6 +138,7 @@ generate_split() {
         --action-scale "$ACTION_SCALE" \
         --action-hold-steps "$ACTION_HOLD_STEPS" \
         --generation-print-interval "$GENERATION_PRINT_INTERVAL" \
+        "${RENDER_ARGS[@]}" \
         "--${split}-dataset-path" "$partial_path"
     mv "$partial_path" "$path"
 }
