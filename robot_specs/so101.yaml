@@ -71,4 +71,5 @@ solver:
   ground_plane: false
   self_collisions: true
   show_collision_mesh: false
+  ncon_per_env: 32
   njmax: 1024
