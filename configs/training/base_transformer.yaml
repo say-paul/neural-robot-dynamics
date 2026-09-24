@@ -30,6 +30,8 @@ network:
 
 optimization:
   learning_rate: 0.001
+  learning_rate_end: 0.0001
+  lr_schedule: linear
   batch_size: 512
   gradient_norm: 1.0
 

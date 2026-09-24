@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-$ROOT_DIR/.venv312/bin/python}"
 MODE="${1:-all}"
 
-# 625k total gives an exact 500k / 62.5k / 62.5k (80/10/10) split.
-TOTAL_TRAJECTORIES="${TOTAL_TRAJECTORIES:-625000}"
+#(80/10/10) split.
+TOTAL_TRAJECTORIES="${TOTAL_TRAJECTORIES:-62500}"
 HORIZON="${HORIZON:-100}"
 PARALLEL_ENVS="${PARALLEL_ENVS:-128}"
 ACTION_SCALE="${ACTION_SCALE:-0.01}"
@@ -20,6 +20,8 @@ VALIDATION_INTERVAL="${VALIDATION_INTERVAL:-5000}"
 VALIDATION_WINDOWS="${VALIDATION_WINDOWS:-4096}"
 PRINT_INTERVAL="${PRINT_INTERVAL:-1000}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-10000}"
+ROLLOUT_HORIZON="${ROLLOUT_HORIZON:-0}"
+ROLLOUT_WINDOWS="${ROLLOUT_WINDOWS:-4096}"
 TENSORBOARD_PORT="${TENSORBOARD_PORT:-6006}"
 RENDER="${RENDER:-0}"
 KEEP_OPEN="${KEEP_OPEN:-0}"
@@ -150,6 +152,12 @@ generate_data() {
 }
 
 train_model() {
+    RESUME_ARGS=()
+    if [[ "$AUTO_RESUME" == "1" && -s "$LATEST_CHECKPOINT" ]]; then
+        RESUME_ARGS=(--resume "$LATEST_CHECKPOINT")
+        echo "Resuming from checkpoint: $LATEST_CHECKPOINT"
+    fi
+
     "$PYTHON" -m training.train \
         --config "$TRAINING_CONFIG" \
         --train-dataset "$TRAIN_DATASET" \
@@ -159,7 +167,15 @@ train_model() {
         --steps "$TRAINING_STEPS" \
         --batch-size "$BATCH_SIZE" \
         --learning-rate "$LEARNING_RATE" \
-        --seed "$SEED"
+        --seed "$SEED" \
+        --log-dir "$LOG_DIR" \
+        --validation-interval "$VALIDATION_INTERVAL" \
+        --validation-windows "$VALIDATION_WINDOWS" \
+        --checkpoint-interval "$CHECKPOINT_INTERVAL" \
+        --print-interval "$PRINT_INTERVAL" \
+        --rollout-horizon "$ROLLOUT_HORIZON" \
+        --rollout-windows "$ROLLOUT_WINDOWS" \
+        "${RESUME_ARGS[@]}"
 
     echo "Checkpoint: $CHECKPOINT"
     echo "View losses: $0 tensorboard"
