@@ -13,7 +13,7 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from envs.neural_environment import NeuralEnvironment
 from models.models import ModelMixedInput
 from training.config import load_training_config
-from training.contact_backends import mujoco_warp_features
+from training.contact_backends import mujoco_warp_features_torch
 from utils.running_mean_std import RunningMeanStd
 
 
@@ -239,8 +239,10 @@ def collect_dataset(args, device, split, seed):
                 )
             states, actions, joint_forces, next_states, valid = [], [], [], [], []
             contacts = []
-            contact_features = np.zeros(
-                (args.num_envs, contact_config["max_contacts"] * 8), dtype=np.float32
+            contact_features = torch.zeros(
+                (args.num_envs, contact_config["max_contacts"] * 8),
+                dtype=torch.float32,
+                device=env.torch_device,
             )
             for step in range(args.horizon):
                 was_terminated = env.terminated.clone()
@@ -262,17 +264,14 @@ def collect_dataset(args, device, split, seed):
                     action = random_action * args.action_scale
                 next_state = env.step(action, env_mode="ground-truth").clone()
                 if collect_contacts:
-                    contact_features = mujoco_warp_features(
+                    contact_features = mujoco_warp_features_torch(
                         env.solver_gt,
                         num_envs=args.num_envs,
-                        features=contact_config["features"],
                         max_contacts=contact_config["max_contacts"],
-                    )
-                    contact_tensor = torch.from_numpy(contact_features).to(
-                        device=env.torch_device
+                        device=env.torch_device,
                     )
                     contact_valid = contact_transition_mask(
-                        contact_tensor, contact_config
+                        contact_features, contact_config
                     )
                 else:
                     contact_valid = torch.ones(
@@ -291,26 +290,28 @@ def collect_dataset(args, device, split, seed):
                 rejected_transitions += int(
                     (~accepted[:batch_trajectories]).sum().item()
                 )
-                states.append(state[:batch_trajectories].cpu())
-                actions.append(action[:batch_trajectories].cpu())
-                joint_forces.append(env.joint_f[:batch_trajectories].cpu())
+                states.append(state[:batch_trajectories].clone())
+                actions.append(action[:batch_trajectories].clone())
+                joint_forces.append(env.joint_f[:batch_trajectories].clone())
                 if collect_contacts:
-                    contacts.append(torch.from_numpy(contact_features[:batch_trajectories]))
-                next_states.append(next_state[:batch_trajectories].cpu())
-                valid.append(accepted[:batch_trajectories].cpu())
+                    contacts.append(contact_features[:batch_trajectories].clone())
+                next_states.append(next_state[:batch_trajectories].clone())
+                valid.append(accepted[:batch_trajectories].clone())
                 if args.diagnostics and render:
                     env.log_robot_diagnostics(step, action)
                 if render:
                     env.render()
                 state = next_state
 
-            batches["states"].append(torch.stack(states, dim=1).numpy())
-            batches["actions"].append(torch.stack(actions, dim=1).numpy())
-            batches["joint_f"].append(torch.stack(joint_forces, dim=1).numpy())
-            batches["next_states"].append(torch.stack(next_states, dim=1).numpy())
-            batches["valid"].append(torch.stack(valid, dim=1).numpy())
+            batches["states"].append(torch.stack(states, dim=1).cpu().numpy())
+            batches["actions"].append(torch.stack(actions, dim=1).cpu().numpy())
+            batches["joint_f"].append(torch.stack(joint_forces, dim=1).cpu().numpy())
+            batches["next_states"].append(torch.stack(next_states, dim=1).cpu().numpy())
+            batches["valid"].append(torch.stack(valid, dim=1).cpu().numpy())
             if collect_contacts:
-                batches["self_contact"].append(torch.stack(contacts, dim=1).numpy())
+                batches["self_contact"].append(
+                    torch.stack(contacts, dim=1).cpu().numpy()
+                )
             collected_trajectories += batch_trajectories
             if collected_trajectories >= next_progress or collected_trajectories == num_trajectories:
                 print(
