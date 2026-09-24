@@ -5,8 +5,10 @@ from collections.abc import Callable, Mapping
 import numpy as np
 import torch
 import torch.nn.functional as functional
+from torch.utils.data import DataLoader
 
 from training.dataset import gather_windows, valid_window_starts
+from training.window_dataset import TrajectoryWindowDataset
 
 
 class SequenceTrainer:
@@ -99,13 +101,50 @@ class SequenceTrainer:
         generator = torch.Generator(device=self.device).manual_seed(seed)
         if generator_state is not None:
             generator.set_state(generator_state.to(device="cpu"))
+        num_workers = int(self.config["optimization"].get("num_workers", 0))
+        if num_workers < 0:
+            raise ValueError("num_workers cannot be negative")
+        loader = None
+        loader_iterator = None
+        if num_workers:
+            loader_generator = torch.Generator().manual_seed(seed)
+            if generator_state is not None:
+                loader_generator.set_state(generator_state.to(device="cpu"))
+            loader = DataLoader(
+                TrajectoryWindowDataset(
+                    dataset,
+                    self.config["inputs"]["low_dim"],
+                    self.sequence_length,
+                ),
+                batch_size=batch_size,
+                shuffle=True,
+                drop_last=True,
+                num_workers=num_workers,
+                persistent_workers=True,
+                pin_memory=self.device.startswith("cuda"),
+                generator=loader_generator,
+            )
+            loader_iterator = iter(loader)
         self.model.train()
         last_loss = float("nan")
         for step in range(start_step, epochs):
-            indices = torch.randint(len(starts), (batch_size,), generator=generator, device=self.device)
-            batch_starts = starts[indices]
-            prediction = self.model(self._inputs(dataset, batch_starts))
-            target = gather_windows(targets, batch_starts, self.sequence_length)
+            if loader_iterator is None:
+                indices = torch.randint(len(starts), (batch_size,), generator=generator, device=self.device)
+                batch_starts = starts[indices]
+                inputs = self._inputs(dataset, batch_starts)
+                target = gather_windows(targets, batch_starts, self.sequence_length)
+            else:
+                try:
+                    inputs, target = next(loader_iterator)
+                except StopIteration:
+                    loader_iterator = iter(loader)
+                    inputs, target = next(loader_iterator)
+                inputs = {
+                    name: values.to(self.device, non_blocking=True)
+                    for name, values in inputs.items()
+                }
+                target = target.to(self.device, non_blocking=True)
+            prediction = self.model(inputs)
             loss = functional.mse_loss(
                 self.model.output_rms.normalize(prediction),
                 self.model.output_rms.normalize(target),

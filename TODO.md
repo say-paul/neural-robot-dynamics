@@ -3,9 +3,9 @@ Migration status from main:
 - [x] Scheduler and TensorBoard
 - [x] Resume-safe checkpoints
 - [x] Dataset/schema compatibility validation
-- [~] DataLoader worker pipeline: replaced the old full-array copy path with a
-	device-resident trajectory cache; worker-backed loading remains optional
-	future work for datasets that do not fit on the selected device.
+- [x] DataLoader worker pipeline: optional worker-prefetched trajectory windows
+	are enabled with `optimization.num_workers`; the device-resident cache
+	remains the default fast path.
 - [x] Generic rollout evaluation
 - [ ] Hybrid physics projection
 - [x] Contact-rich dataset generation

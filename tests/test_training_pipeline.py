@@ -104,6 +104,23 @@ def test_sequence_trainer_runs_scheduled_steps_and_callback():
     assert observed_steps[-1][1] == pytest.approx(0.1)
 
 
+def test_sequence_trainer_supports_worker_prefetching():
+    model = DummyModel(2)
+    config = training_config()
+    config["optimization"]["num_workers"] = 1
+    trainer = SequenceTrainer(model, config, "cpu")
+
+    result = trainer.fit(
+        trajectory_dataset(),
+        epochs=2,
+        batch_size=1,
+        learning_rate=1.0,
+        seed=7,
+    )
+
+    assert result["completed_steps"] == 2
+
+
 def test_checkpoint_round_trip_restores_model_and_optimizer(tmp_path):
     config = training_config()
     first = DummyModel(2)

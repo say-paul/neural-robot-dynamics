@@ -33,6 +33,7 @@ optimization:
   learning_rate_end: 0.0001
   lr_schedule: linear
   batch_size: 512
+  num_workers: 0
   gradient_norm: 1.0
 
 contact:
