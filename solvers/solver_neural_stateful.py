@@ -39,36 +39,6 @@ class StatefulNeuralSolver(NeuralSolver):
         
     def reset_states_history(self):
         self.states_history = deque(maxlen=self.num_states_history)
-        for _ in range(self.num_states_history):
-            contacts = self.get_abstract_contacts(self.model)
-            self.states_history.append(
-                {
-                    'root_body_q': 
-                        torch.zeros(
-                            (self.num_envs, 7),
-                            device=self.torch_device
-                        ),
-                    'states': 
-                        torch.zeros(
-                            (self.num_envs, self.state_dim), 
-                            device=self.torch_device
-                        ),
-                    'states_embedding': 
-                        torch.zeros(
-                            (self.num_envs, self.state_embedding_dim), 
-                            device=self.torch_device
-                        ),
-                    'joint_f': 
-                        torch.zeros((self.num_envs, self.model_joint_f_dim), 
-                            device=self.torch_device
-                        ),
-                    'self_contact': torch.zeros_like(self.self_contact),
-                    'gravity_dir':
-                        torch.zeros((self.num_envs, 3),
-                            device=self.torch_device
-                        ),
-                    **contacts
-                })
     
     def reset(self):
         self.reset_states_history()

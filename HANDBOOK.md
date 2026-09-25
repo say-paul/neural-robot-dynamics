@@ -169,18 +169,19 @@ Pressing `Ctrl+C` while running `tail -f` stops only the log viewer, not a `nohu
 A checkpoint completed at step 10,000 must be resumed with `--steps 60000` to perform 50,000 additional steps:
 
 ```bash
-RESUME_OUT="$PWD/outputs/so101_transformer_contact_62500_resume_50k"
-RESUME_TB="$PWD/outputs/tensorboard/so101_transformer_contact_62500_resume_50k"
+CONFIG="so101"
+RESUME_OUT="$PWD/outputs/so101_transformer_contact_62500_1m"
+RESUME_TB="$PWD/outputs/tensorboard/so101_transformer_contact_62500_1m"
 mkdir -p "$RESUME_OUT" "$RESUME_TB"
 
 nohup "$PYTHON" -m training.train \
   --config "$CONFIG" \
-  --train-dataset "$OUT/train.hdf5" \
-  --validation-dataset "$OUT/validation.hdf5" \
-  --test-dataset "$OUT/test.hdf5" \
+  --train-dataset "$RESUME_OUT/train.hdf5" \
+  --validation-dataset "$RESUME_OUT/validation.hdf5" \
+  --test-dataset "$RESUME_OUT/test.hdf5" \
   --checkpoint "$RESUME_OUT/model.pt" \
-  --resume "$OUT/model.latest.pt" \
-  --steps 60000 \
+  --resume "$RESUME_OUT/model.latest.pt" \
+  --steps 80000 \
   --batch-size 512 \
   --learning-rate 1e-3 \
   --seed 42 \
@@ -237,6 +238,48 @@ nohup "$PWD/.venv312/bin/tensorboard" \
   --port 6006 \
   > "$PWD/outputs/tensorboard/tensorboard.log" 2>&1 < /dev/null &
 ```
+
+### 2.9 Neural rollout with Rerun
+
+Run a short headless rollout first. The rollout uses the same 20-step held random-walk actions as data generation and can clamp predicted positions and velocities to the robot limits:
+
+```bash
+PYTHONPATH="$PWD" "$PYTHON" examples/example_robot_rollout.py \
+  --robot-id so101 \
+  --num-envs 1 \
+  --horizon 100 \
+  --default-pose \
+  --nerd-checkpoint "$OUT/model.pt" \
+  --random-actions \
+  --action-scale 0.01 \
+  --action-hold-steps 20 \
+  --enforce-limits
+```
+
+For Rerun, add rendering and keep the viewer alive:
+
+```bash
+PYTHONPATH="$PWD" "$PYTHON" examples/example_robot_rollout.py \
+  --robot-id so101 \
+  --num-envs 1 \
+  --horizon 100 \
+  --default-pose \
+  --nerd-checkpoint "$OUT/model.pt" \
+  --random-actions \
+  --action-scale 0.01 \
+  --action-hold-steps 20 \
+  --enforce-limits \
+  --render \
+  --render-backend rerun \
+  --rerun-view camera \
+  --grpc-port 19878 \
+  --web-port 19092 \
+  --browser-host localhost \
+  --diagnostics \
+  --keep-open
+```
+
+Forward port `19092` in VS Code and open `http://localhost:19092`. The limit guard prevents invalid joint positions and velocities but does not replace collision projection or real-robot safety controls.
 
 ## 3. Data Generation CLI Reference
 

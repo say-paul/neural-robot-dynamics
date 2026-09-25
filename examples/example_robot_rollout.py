@@ -65,6 +65,28 @@ def load_nerd_model(checkpoint_path, device):
     return model, checkpoint
 
 
+def enforce_robot_limits(env, state):
+    robot_spec = getattr(env.env, "robot_spec", None)
+    if robot_spec is None:
+        return state
+    position_limits = torch.as_tensor(
+        robot_spec.joint_limits, dtype=state.dtype, device=state.device
+    )
+    velocity_limits = torch.as_tensor(
+        robot_spec.velocity_limits, dtype=state.dtype, device=state.device
+    )
+    limited_state = state.clone()
+    position_dim = env.dof_q_per_env
+    limited_state[:, :position_dim] = limited_state[:, :position_dim].clamp(
+        position_limits[:, 0], position_limits[:, 1]
+    )
+    limited_state[:, position_dim:] = limited_state[:, position_dim:].clamp(
+        -velocity_limits, velocity_limits
+    )
+    env._update_states(limited_state)
+    return env.states
+
+
 def main():
     parser = argparse.ArgumentParser(description="Headless NeRD Newton robot rollout")
     parser.add_argument("--robot-id", default="franka_panda")
@@ -93,9 +115,20 @@ def main():
         help="Scale random actions before the environment clamps them.",
     )
     parser.add_argument(
+        "--action-hold-steps",
+        type=int,
+        default=20,
+        help="Hold each random-walk target for this many rollout steps.",
+    )
+    parser.add_argument(
         "--default-pose",
         action="store_true",
         help="Start the robot in its configured default pose instead of a random pose.",
+    )
+    parser.add_argument(
+        "--enforce-limits",
+        action="store_true",
+        help="Clamp neural rollout positions and velocities to the robot limits.",
     )
     parser.add_argument(
         "--render-backend",
@@ -118,6 +151,8 @@ def main():
         help="Rerun view: clean native camera image or experimental 3D scene.",
     )
     args = parser.parse_args()
+    if args.action_hold_steps < 1:
+        parser.error("--action-hold-steps must be positive")
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     render_config = {}
@@ -176,22 +211,32 @@ def main():
         env.reset()
         state = env.states
         generator = torch.Generator(device=env.torch_device).manual_seed(args.seed + 1)
+        action = torch.zeros(
+            (args.num_envs, env.action_dim), device=env.torch_device
+        )
         for step in range(args.horizon):
             if args.random_actions:
-                actions = (
-                    torch.rand(
-                        (args.num_envs, env.action_dim),
-                        generator=generator,
-                        device=env.torch_device,
+                if step % args.action_hold_steps == 0:
+                    random_action = (
+                        torch.rand(
+                            (args.num_envs, env.action_dim),
+                            generator=generator,
+                            device=env.torch_device,
+                        )
+                        * 2.0
+                        - 1.0
                     )
-                    * 2.0
-                    - 1.0
-                ) * args.action_scale
+                    action = (action + random_action * args.action_scale).clamp(
+                        -1.0, 1.0
+                    )
+                actions = action
             else:
                 actions = torch.zeros(
                     (args.num_envs, env.action_dim), device=env.torch_device
                 )
             state = env.step(actions, env_mode=env_mode)
+            if args.enforce_limits and env_mode == "neural":
+                state = enforce_robot_limits(env, state)
             if args.diagnostics:
                 env.log_robot_diagnostics(step, actions)
             if args.render:
